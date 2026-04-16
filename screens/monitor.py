@@ -1,25 +1,27 @@
-"""Monitor screen: LSF job status table."""
+"""Monitor screen: experiment-folder-driven LSF status + command launcher."""
 
 import os
+import shlex
 import subprocess
 from datetime import datetime
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QHeaderView, QPushButton, QLabel, QAbstractItemView, QLineEdit,
-    QSplitter, QTextEdit, QGroupBox,
+    QSplitter, QGroupBox,
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QBrush, QColor, QFont
 
 from config import LSF_LOG_DIR
 
-# ── Status colours ────────────────────────────────────────────────────────────
+# ── Colours ───────────────────────────────────────────────────────────────────
 
-_C_COMPLETE    = QColor("#28a745")   # green
-_C_IN_PROGRESS = QColor("#fd7e14")   # orange
-_C_CRASH       = QColor("#dc3545")   # red
-_C_PENDING     = QColor("#888888")   # grey
+_C_COMPLETE    = QColor("#28a745")
+_C_IN_PROGRESS = QColor("#fd7e14")
+_C_CRASH       = QColor("#dc3545")
+_C_PENDING     = QColor("#888888")
+_C_UNKNOWN     = QColor("#aaaaaa")
 
 _LSF_STAT_MAP = {
     "RUN":   ("In Progress", _C_IN_PROGRESS),
@@ -31,6 +33,7 @@ _LSF_STAT_MAP = {
     "USUSP": ("Suspended",   _C_PENDING),
     "PSUSP": ("Suspended",   _C_PENDING),
 }
+_UNKNOWN_STATUS = ("Unknown", _C_UNKNOWN)
 
 # ── LSF helpers ───────────────────────────────────────────────────────────────
 
@@ -47,10 +50,10 @@ def _shell(cmd: str) -> str:
 
 
 def _bjobs_all() -> list[dict]:
-    """Parse `bjobs -a` into list of {job_id, stat, queue, exec_host}."""
+    """Parse `bjobs -a` → list of {job_id, stat, queue, exec_host}."""
     out = _shell("bjobs -a 2>/dev/null")
     jobs = []
-    for line in out.splitlines()[1:]:   # skip header
+    for line in out.splitlines()[1:]:
         cols = line.split()
         if len(cols) >= 3:
             jobs.append({
@@ -63,10 +66,9 @@ def _bjobs_all() -> list[dict]:
 
 
 def _find_log(job_id: str) -> str | None:
-    """Search LOG_DIR/<DD-MM-YY>/<job_id>.out going backward in time."""
+    """Search LSF_LOG_DIR/<DD-MM-YY>/<job_id>.out going backward in time."""
     today = datetime.today()
     year, month = today.year, today.month
-
     for y in (year, year - 1):
         m_range = range(month, 0, -1) if y == year else range(12, 0, -1)
         for m in m_range:
@@ -93,7 +95,7 @@ def _read_log(job_id: str) -> str:
 
 
 def _extract_name(log: str) -> str:
-    """Extract the value of -D from the command line in the log."""
+    """Extract the -D value from the command line embedded in the log."""
     idx = log.find("-D ")
     if idx == -1:
         return ""
@@ -102,7 +104,6 @@ def _extract_name(log: str) -> str:
         q = rest[0]
         end = rest.find(q, 1)
         return rest[1:end] if end != -1 else rest[1:]
-    # unquoted — up to first space or newline
     for ch in (" ", "\t", "\n"):
         pos = rest.find(ch)
         if pos != -1:
@@ -111,7 +112,7 @@ def _extract_name(log: str) -> str:
 
 
 def _extract_command(log: str) -> str:
-    """Return the training command line from the log (first /algo/ws line or bsub line)."""
+    """Return the full launch command line from the log."""
     for prefix in ("/algo/ws", "bsub ", "drun "):
         idx = log.find(prefix)
         if idx != -1:
@@ -120,29 +121,110 @@ def _extract_command(log: str) -> str:
     return ""
 
 
-def _extract_branch(command: str) -> str:
-    """Try to extract a git branch hint from the command string."""
-    for flag in ("--branch ", "-branch ", "--br "):
-        idx = command.find(flag)
-        if idx != -1:
-            rest = command[idx + len(flag):].split()[0]
-            return rest.strip("'\"")
-    return ""
+def _build_lsf_index() -> dict[str, dict]:
+    """Return {exp_name: {job_id, stat, label, color, command, queue, exec_host}}."""
+    index: dict[str, dict] = {}
+    for job in _bjobs_all():
+        job_id = job["job_id"]
+        log = _read_log(job_id)
+        name = _extract_name(log)
+        if not name:
+            continue
+        command = _extract_command(log)
+        label, color = _LSF_STAT_MAP.get(job["stat"].upper(), _UNKNOWN_STATUS)
+        index[name] = {
+            "job_id":    job_id,
+            "stat":      job["stat"],
+            "label":     label,
+            "color":     color,
+            "command":   command,
+            "queue":     job["queue"],
+            "exec_host": job["exec_host"],
+        }
+    return index
+
+# ── Command parser ────────────────────────────────────────────────────────────
+
+def _parse_command(cmd: str) -> list[tuple[str, str]]:
+    """Tokenise a shell command into (flag, value) pairs.
+
+    Positional (non-flag) tokens are grouped into a single row with flag="".
+    Quoted strings are handled via shlex.split.
+    """
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        tokens = cmd.split()
+
+    rows: list[tuple[str, str]] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok.startswith("-"):
+            flag = tok
+            i += 1
+            value = ""
+            if i < len(tokens) and not tokens[i].startswith("-"):
+                value = tokens[i]
+                i += 1
+            rows.append((flag, value))
+        else:
+            pos = [tok]
+            i += 1
+            while i < len(tokens) and not tokens[i].startswith("-"):
+                pos.append(tokens[i])
+                i += 1
+            rows.append(("", " ".join(pos)))
+    return rows
 
 
-def _stat_label(stat: str) -> tuple[str, QColor]:
-    return _LSF_STAT_MAP.get(stat.upper(), (stat, _C_PENDING))
+def _reconstruct_command(rows: list[tuple[str, str]]) -> str:
+    """Rebuild a shell command string from (flag, value) pairs."""
+    parts = []
+    for flag, value in rows:
+        if flag:
+            if value:
+                # quote if the value contains shell-special characters
+                safe = shlex.quote(value) if any(c in value for c in " \t[](){}\"'") else value
+                parts.append(f"{flag} {safe}")
+            else:
+                parts.append(flag)
+        elif value:
+            parts.append(value)
+    return " ".join(parts)
 
+# ── Experiment name helpers ───────────────────────────────────────────────────
+
+def _display_name(project: str, exp: dict) -> str:
+    if project == "VBP":
+        return f"{exp['setup']} / {exp['kr_folder']}"
+    return exp.get("exp_name", "")
+
+
+def _lsf_keys(project: str, exp: dict) -> list[str]:
+    """Candidate -D values to look up in the LSF index (most specific first)."""
+    if project == "VBP":
+        return [
+            exp["setup"],
+            f"{exp['setup']}/{exp['kr_folder']}",
+            exp["kr_folder"],
+        ]
+    name = exp.get("exp_name", "")
+    return [name] if name else []
+
+# ── Column headers ────────────────────────────────────────────────────────────
+
+_TABLE_HEADERS = ["Name", "Status", "Command"]
+_ARG_HEADERS   = ["Arg", "Value"]
 
 # ── Widget ────────────────────────────────────────────────────────────────────
-
-_HEADERS = ["Job ID", "Name (-D)", "Status", "Command"]
-
 
 class MonitorScreen(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._rows: list[dict] = []   # raw job dicts for detail panel
+        self._project: str = ""
+        self._data: list = []
+        self._exp_infos: list[dict] = []   # parallel to table rows
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -151,12 +233,10 @@ class MonitorScreen(QWidget):
         # ── Top bar ───────────────────────────────────────────────────
         top = QHBoxLayout()
         top.setSpacing(8)
-
-        filter_label = QLabel("Filter:")
-        top.addWidget(filter_label)
+        top.addWidget(QLabel("Filter:"))
 
         self.filter_input = QLineEdit()
-        self.filter_input.setPlaceholderText("Filter rows…")
+        self.filter_input.setPlaceholderText("Filter experiments…")
         self.filter_input.setClearButtonEnabled(True)
         self.filter_input.textChanged.connect(self._apply_filter)
         top.addWidget(self.filter_input, stretch=1)
@@ -172,9 +252,10 @@ class MonitorScreen(QWidget):
 
         layout.addLayout(top)
 
-        # ── Splitter: table + detail ──────────────────────────────────
+        # ── Splitter: experiments table / launch panel ────────────────
         splitter = QSplitter(Qt.Vertical)
 
+        # Experiments table
         self.table = QTableWidget()
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -191,92 +272,120 @@ class MonitorScreen(QWidget):
         self.table.itemSelectionChanged.connect(self._on_row_selected)
         splitter.addWidget(self.table)
 
-        self.detail_box = QGroupBox("Detail")
-        self.detail_box.setVisible(False)
-        detail_layout = QVBoxLayout(self.detail_box)
-        self.detail_text = QTextEdit()
-        self.detail_text.setReadOnly(True)
-        self.detail_text.setFont(QFont("monospace", 11))
-        self.detail_text.setMaximumHeight(180)
-        detail_layout.addWidget(self.detail_text)
-        splitter.addWidget(self.detail_box)
+        # Launch panel
+        self.launch_box = QGroupBox("Launch")
+        self.launch_box.setVisible(False)
+        launch_layout = QVBoxLayout(self.launch_box)
+        launch_layout.setSpacing(4)
 
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 0)
+        self.args_table = QTableWidget()
+        self.args_table.setColumnCount(2)
+        self.args_table.setHorizontalHeaderLabels(_ARG_HEADERS)
+        self.args_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.args_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.args_table.verticalHeader().setVisible(False)
+        self.args_table.setStyleSheet(
+            "QTableWidget { font-family: monospace; font-size: 12px; }"
+            "QHeaderView::section { background: #f0f0f0; font-weight: bold; padding: 4px; }"
+        )
+        self.args_table.cellChanged.connect(self._update_cmd_preview)
+        launch_layout.addWidget(self.args_table)
+
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(8)
+
+        self.cmd_preview = QLabel("")
+        self.cmd_preview.setStyleSheet("font-family: monospace; font-size: 10px; color: #555;")
+        self.cmd_preview.setWordWrap(True)
+        bottom_row.addWidget(self.cmd_preview, stretch=1)
+
+        self.launch_btn = QPushButton("Launch")
+        self.launch_btn.setFixedWidth(90)
+        self.launch_btn.setStyleSheet(
+            "QPushButton { background-color: #0d6efd; color: white; "
+            "border-radius: 4px; font-weight: bold; }"
+            "QPushButton:hover { background-color: #0b5ed7; }"
+            "QPushButton:disabled { background-color: #aaa; }"
+        )
+        self.launch_btn.clicked.connect(self._on_launch)
+        bottom_row.addWidget(self.launch_btn)
+
+        launch_layout.addLayout(bottom_row)
+        splitter.addWidget(self.launch_box)
+
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 1)
         layout.addWidget(splitter)
 
     # ── Public ────────────────────────────────────────────────────────
 
-    def load(self, project: str, _data: list):
-        """Called by MainWindow when project changes — auto-refresh."""
+    def load(self, project: str, data: list):
+        self._project = project
+        self._data = data
         self.refresh()
 
     def refresh(self):
         self.refresh_btn.setEnabled(False)
         self.status_label.setText("Loading…")
-        self.detail_box.setVisible(False)
-        self._rows.clear()
+        self.launch_box.setVisible(False)
+        self._exp_infos.clear()
         self._fill_table()
         self.refresh_btn.setEnabled(True)
 
     # ── Internal ──────────────────────────────────────────────────────
 
     def _fill_table(self):
-        jobs = _bjobs_all()
+        lsf_index = _build_lsf_index()
 
         self.table.clearContents()
         self.table.setRowCount(0)
-        self.table.setColumnCount(len(_HEADERS))
-        self.table.setHorizontalHeaderLabels(_HEADERS)
+        self.table.setColumnCount(len(_TABLE_HEADERS))
+        self.table.setHorizontalHeaderLabels(_TABLE_HEADERS)
 
-        if not jobs:
-            self.status_label.setText("No jobs found (bjobs returned nothing).")
+        if not self._data:
+            self.status_label.setText("No experiments loaded. Select a project first.")
             return
 
         bold = QFont("monospace", 12)
         bold.setBold(True)
 
-        for job in jobs:
-            job_id = job["job_id"]
-            stat   = job["stat"]
-            label, color = _stat_label(stat)
+        for exp in self._data:
+            dname = _display_name(self._project, exp)
+            keys  = _lsf_keys(self._project, exp)
 
-            log      = _read_log(job_id)
-            name     = _extract_name(log)
-            command  = _extract_command(log)
-            branch   = _extract_branch(command)
+            lsf_info = next(
+                (lsf_index[k] for k in keys if k in lsf_index),
+                None,
+            )
+            label, color = (lsf_info["label"], lsf_info["color"]) \
+                if lsf_info else _UNKNOWN_STATUS
+            command = lsf_info["command"] if lsf_info else ""
 
-            self._rows.append({
-                "job_id":  job_id,
-                "stat":    stat,
-                "label":   label,
-                "name":    name,
-                "command": command,
-                "branch":  branch,
-                "log":     log,
-                **{k: job[k] for k in ("queue", "exec_host")},
+            self._exp_infos.append({
+                "display_name": dname,
+                "label":        label,
+                "command":      command,
+                "lsf_info":     lsf_info,
             })
 
             row = self.table.rowCount()
             self.table.insertRow(row)
 
-            for col, text in enumerate([job_id, name, label, command]):
+            for col, text in enumerate([dname, label, command]):
                 item = QTableWidgetItem(text)
                 item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-                if col == 2:                       # Status — coloured + bold
+                if col == 1:
                     item.setForeground(QBrush(color))
                     item.setFont(bold)
                 self.table.setItem(row, col, item)
 
         self.table.resizeColumnsToContents()
-        # cap Job ID and Status columns so command gets space
-        self.table.setColumnWidth(0, min(self.table.columnWidth(0), 90))
-        self.table.setColumnWidth(2, min(self.table.columnWidth(2), 110))
+        self.table.setColumnWidth(1, min(self.table.columnWidth(1), 120))
 
-        n = len(jobs)
-        n_run = sum(1 for j in jobs if j["stat"].upper() == "RUN")
+        n = len(self._data)
+        n_run = sum(1 for i in self._exp_infos if i["label"] == "In Progress")
         self.status_label.setText(
-            f"{n} job{'s' if n != 1 else ''}  •  {n_run} running"
+            f"{n} experiment{'s' if n != 1 else ''}  •  {n_run} running"
         )
 
     def _apply_filter(self, text: str):
@@ -292,30 +401,53 @@ class MonitorScreen(QWidget):
     def _on_row_selected(self):
         rows = self.table.selectionModel().selectedRows()
         if not rows:
-            self.detail_box.setVisible(False)
+            self.launch_box.setVisible(False)
             return
-        visual_row = rows[0].row()
-        # map visual row back to self._rows (hidden rows shift visual index)
-        visible = [r for r in range(self.table.rowCount())
-                   if not self.table.isRowHidden(r)]
-        if visual_row >= len(visible):
+        row = rows[0].row()
+        if row >= len(self._exp_infos):
             return
-        real_row = visible[visual_row]
-        if real_row >= len(self._rows):
-            return
+        self._populate_launch_panel(self._exp_infos[row])
 
-        d = self._rows[real_row]
-        lines = [
-            f"Job ID   : {d['job_id']}",
-            f"Status   : {d['label']}  (LSF: {d['stat']})",
-            f"Queue    : {d['queue']}",
-            f"Host     : {d['exec_host']}",
-        ]
-        if d["branch"]:
-            lines.append(f"Branch   : {d['branch']}")
-        lines += ["", "── Command ──", d["command"] or "(not found in log)"]
+    def _populate_launch_panel(self, info: dict):
+        self.launch_box.setTitle(f"Launch — {info['display_name']}")
+        arg_rows = _parse_command(info["command"]) if info["command"] else []
 
-        self.detail_text.setPlainText("\n".join(lines))
-        title = d["name"] or d["job_id"]
-        self.detail_box.setTitle(f"Detail — {title}")
-        self.detail_box.setVisible(True)
+        self.args_table.blockSignals(True)
+        self.args_table.clearContents()
+        self.args_table.setRowCount(len(arg_rows))
+
+        grey = QColor("#f0f0f0")
+        for r, (flag, value) in enumerate(arg_rows):
+            flag_item = QTableWidgetItem(flag)
+            flag_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            flag_item.setBackground(QBrush(grey))
+            self.args_table.setItem(r, 0, flag_item)
+            self.args_table.setItem(r, 1, QTableWidgetItem(value))
+
+        self.args_table.blockSignals(False)
+        self._update_cmd_preview()
+        self.launch_box.setVisible(True)
+
+    def _update_cmd_preview(self):
+        cmd = _reconstruct_command(self._collect_arg_rows())
+        preview = cmd if len(cmd) <= 120 else cmd[:117] + "…"
+        self.cmd_preview.setText(preview)
+
+    def _collect_arg_rows(self) -> list[tuple[str, str]]:
+        rows = []
+        for r in range(self.args_table.rowCount()):
+            fi = self.args_table.item(r, 0)
+            vi = self.args_table.item(r, 1)
+            rows.append((fi.text() if fi else "", vi.text() if vi else ""))
+        return rows
+
+    def _on_launch(self):
+        cmd = _reconstruct_command(self._collect_arg_rows()).strip()
+        if not cmd:
+            return
+        self.status_label.setText("Launching…")
+        try:
+            subprocess.Popen(cmd, shell=True)
+            self.status_label.setText("Launched.")
+        except Exception as e:
+            self.status_label.setText(f"Launch failed: {e}")
