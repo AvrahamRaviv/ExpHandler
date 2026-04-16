@@ -3,7 +3,7 @@
 Expected structure:
     root_dir/
         <exp_name>/
-            evaluation_metrics/
+            evaluation_metrices/
                 03_total_metrics.json
 """
 
@@ -30,7 +30,7 @@ def scan_odt(root_dir: str) -> list:
     for exp_dir in sorted(root.iterdir()):
         if not exp_dir.is_dir():
             continue
-        metrics_path = exp_dir / "evaluation_metrics" / "03_total_metrics.json"
+        metrics_path = exp_dir / "evaluation_metrices" / "03_total_metrics.json"
         if not metrics_path.exists():
             continue
         try:
