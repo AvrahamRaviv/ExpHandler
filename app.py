@@ -1,32 +1,31 @@
-"""ExpHandler — Experiment management GUI.
+"""ExpHandler — Experiment management GUI (PyQt5).
 
-Run locally:
+Run:
     python app.py
-
-Access in browser at http://127.0.0.1:8050
 """
 
-import os
 import sys
+import os
 
-# Ensure project root is on the path (important when running from other dirs)
+# Ensure project root is on path
 _root = os.path.dirname(os.path.abspath(__file__))
 if _root not in sys.path:
     sys.path.insert(0, _root)
 
-from dash import Dash
-from layout import gen_layout
-import callbacks  # noqa — registers all callbacks by importing the package
+from PyQt5.QtWidgets import QApplication
+from PyQt5.QtGui import QIcon
+from ui.main_window import MainWindow
 
-app = Dash(
-    __name__,
-    title="ExpHandler",
-    suppress_callback_exceptions=True,  # needed for dynamically rendered components
-)
-app.layout = gen_layout()
+
+def main():
+    app = QApplication(sys.argv)
+    app.setApplicationName("ExpHandler")
+    app.setStyle("Fusion")  # consistent look on Linux and Mac
+
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec_())
 
 
 if __name__ == "__main__":
-    host = os.getenv("HOSTNAME", "127.0.0.1")
-    port = int(os.getenv("PORT", 8050))
-    app.run(host=host, port=port, debug=True)
+    main()

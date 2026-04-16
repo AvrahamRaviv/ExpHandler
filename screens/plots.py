@@ -1,204 +1,230 @@
-"""Build the Plots panel component for a given project and its loaded data."""
+"""Plots screen: experiment selector + embedded matplotlib figure."""
 
-from dash import dcc, html
-import dash_mantine_components as dmc
-import plotly.graph_objects as go
-import plotly.express as px
+from PyQt5.QtWidgets import (
+    QWidget, QHBoxLayout, QVBoxLayout, QSplitter,
+    QListWidget, QListWidgetItem, QLabel, QAbstractItemView, QGroupBox,
+)
+from PyQt5.QtCore import Qt
 
-
-def build_plots_panel(project: str, data: list):
-    """Return a panel with selectors and an empty graph (populated by cb_plots)."""
-    if not data:
-        return dmc.Text("No experiments found.", color="dimmed", mt=20)
-
-    if project == "DVNR":
-        return _dvnr_panel(data)
-    elif project == "ODT":
-        return _odt_panel(data)
-    elif project == "VBP":
-        return _vbp_panel(data)
-    return dmc.Text(f"Unknown project: {project}", color="red")
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
+from matplotlib.figure import Figure
+import matplotlib.pyplot as plt
 
 
-# ---------------------------------------------------------------------------
-# DVNR — line chart: loss vs epoch, multi-exp + multi-loss-key selectable
-# ---------------------------------------------------------------------------
+class PlotsScreen(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._data: list = []
+        self._project: str = ""
 
-def _dvnr_panel(data: list):
-    exp_options = [{"value": e["exp_name"], "label": e["exp_name"]} for e in data]
-    loss_keys = list(data[0]["losses"].keys()) if data else []
-    loss_options = [{"value": k, "label": k} for k in loss_keys]
-    default_exps = [e["exp_name"] for e in data]
-    default_losses = loss_keys[:3] if len(loss_keys) > 3 else loss_keys
+        splitter = QSplitter(Qt.Horizontal)
 
-    return html.Div([
-        dmc.Group([
-            dmc.MultiSelect(
-                id="plots-exp-selector",
-                label="Experiments",
-                data=exp_options,
-                value=default_exps,
-                style={"width": 350},
-                searchable=True,
-            ),
-            dmc.MultiSelect(
-                id="plots-loss-selector",
-                label="Loss keys",
-                data=loss_options,
-                value=default_losses,
-                style={"width": 400},
-                searchable=True,
-            ),
-        ], spacing=20, align="flex-end"),
-        dcc.Graph(id="plot-main", figure=_empty_fig("Select experiments above"),
-                  style={"marginTop": 16}),
-    ])
+        # --- Left: selector panel ---
+        selector_widget = QWidget()
+        selector_layout = QVBoxLayout(selector_widget)
+        selector_layout.setContentsMargins(4, 4, 4, 4)
 
+        self.exp_label = QLabel("Experiments")
+        self.exp_label.setStyleSheet("font-weight: bold;")
+        selector_layout.addWidget(self.exp_label)
 
-# ---------------------------------------------------------------------------
-# ODT — bar chart: metrics per experiment
-# ---------------------------------------------------------------------------
+        self.exp_list = QListWidget()
+        self.exp_list.setSelectionMode(QAbstractItemView.MultiSelection)
+        self.exp_list.itemSelectionChanged.connect(self._update_plot)
+        selector_layout.addWidget(self.exp_list)
 
-def _odt_panel(data: list):
-    exp_options = [{"value": e["exp_name"], "label": e["exp_name"]} for e in data]
-    default_exps = [e["exp_name"] for e in data]
+        # Loss key selector (DVNR only)
+        self.loss_box = QGroupBox("Loss keys")
+        self.loss_box.setVisible(False)
+        loss_layout = QVBoxLayout(self.loss_box)
+        self.loss_list = QListWidget()
+        self.loss_list.setSelectionMode(QAbstractItemView.MultiSelection)
+        self.loss_list.itemSelectionChanged.connect(self._update_plot)
+        loss_layout.addWidget(self.loss_list)
+        selector_layout.addWidget(self.loss_box)
 
-    return html.Div([
-        dmc.MultiSelect(
-            id="plots-exp-selector",
-            label="Experiments",
-            data=exp_options,
-            value=default_exps,
-            style={"width": 450},
-            searchable=True,
-        ),
-        # Hidden placeholder for loss selector (used by shared callback)
-        dcc.Store(id="plots-loss-selector-value", data=[]),
-        dcc.Graph(id="plot-main", figure=_empty_fig("Select experiments above"),
-                  style={"marginTop": 16}),
-    ])
+        selector_widget.setMinimumWidth(180)
+        selector_widget.setMaximumWidth(280)
+        splitter.addWidget(selector_widget)
 
+        # --- Right: matplotlib ---
+        plot_widget = QWidget()
+        plot_layout = QVBoxLayout(plot_widget)
+        plot_layout.setContentsMargins(0, 0, 0, 0)
 
-# ---------------------------------------------------------------------------
-# VBP — val_acc vs epoch (FT phase), multi-exp selectable
-# ---------------------------------------------------------------------------
+        self.figure = Figure(tight_layout=True)
+        self.canvas = FigureCanvasQTAgg(self.figure)
+        self.toolbar = NavigationToolbar2QT(self.canvas, plot_widget)
+        plot_layout.addWidget(self.toolbar)
+        plot_layout.addWidget(self.canvas)
+        splitter.addWidget(plot_widget)
 
-def _vbp_panel(data: list):
-    exp_options = [
-        {"value": f"{e['setup']}/{e['kr_folder']}", "label": f"{e['setup']} | {e['kr_folder']}"}
-        for e in data
-    ]
-    default_exps = [opt["value"] for opt in exp_options]
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
 
-    return html.Div([
-        dmc.MultiSelect(
-            id="plots-exp-selector",
-            label="Experiments  (setup / keep-ratio)",
-            data=exp_options,
-            value=default_exps,
-            style={"width": 500},
-            searchable=True,
-        ),
-        dcc.Graph(id="plot-main", figure=_empty_fig("Select experiments above"),
-                  style={"marginTop": 16}),
-    ])
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(splitter)
 
+    # ------------------------------------------------------------------
+    def load(self, project: str, data: list):
+        self._project = project
+        self._data = data
 
-# ---------------------------------------------------------------------------
-# Figure generators (called from cb_plots)
-# ---------------------------------------------------------------------------
+        self.exp_list.blockSignals(True)
+        self.loss_list.blockSignals(True)
 
-def make_dvnr_figure(data: list, selected_exps: list, selected_losses: list) -> go.Figure:
-    """Line chart: one trace per (exp, loss_key)."""
-    exp_map = {e["exp_name"]: e for e in data}
-    fig = go.Figure()
-    for exp_name in selected_exps:
-        exp = exp_map.get(exp_name)
-        if not exp:
-            continue
-        for loss_key in selected_losses:
-            values = exp["losses"].get(loss_key, [])
-            epochs = list(range(1, len(values) + 1))
-            fig.add_trace(go.Scatter(
-                x=epochs, y=values,
-                mode="lines+markers",
-                name=f"{exp_name} / {loss_key}",
-                hovertemplate="epoch %{x}<br>%{y:.4f}<extra>%{fullData.name}</extra>",
-            ))
-    fig.update_layout(
-        xaxis_title="Epoch",
-        yaxis_title="Loss",
-        legend_title="Exp / Loss key",
-        template="plotly_white",
-        margin=dict(l=50, r=20, t=40, b=50),
-    )
-    return fig
+        self.exp_list.clear()
+        self.loss_list.clear()
 
+        if project == "DVNR":
+            for exp in data:
+                item = QListWidgetItem(exp["exp_name"])
+                self.exp_list.addItem(item)
+                item.setSelected(True)
+            if data:
+                for k in data[0]["losses"].keys():
+                    item = QListWidgetItem(k)
+                    self.loss_list.addItem(item)
+                    item.setSelected(True)
+            self.loss_box.setVisible(True)
 
-def make_odt_figure(data: list, selected_exps: list) -> go.Figure:
-    """Grouped bar chart: one group per experiment, one bar per metric."""
-    exp_map = {e["exp_name"]: e for e in data}
-    fig = go.Figure()
-    for exp_name in selected_exps:
-        exp = exp_map.get(exp_name)
-        if not exp:
-            continue
-        metrics = exp["metrics"]
-        keys = [k for k, v in metrics.items() if v is not None]
-        values = [metrics[k] for k in keys]
-        fig.add_trace(go.Bar(
-            name=exp_name,
-            x=keys, y=values,
-            hovertemplate="%{x}: %{y:.4f}<extra>%{fullData.name}</extra>",
-        ))
-    fig.update_layout(
-        barmode="group",
-        xaxis_title="Metric",
-        yaxis_title="Value",
-        yaxis_range=[0, 1.05],
-        legend_title="Experiment",
-        template="plotly_white",
-        margin=dict(l=50, r=20, t=40, b=100),
-        xaxis_tickangle=-45,
-    )
-    return fig
+        elif project == "ODT":
+            for exp in data:
+                item = QListWidgetItem(exp["exp_name"])
+                self.exp_list.addItem(item)
+                item.setSelected(True)
+            self.loss_box.setVisible(False)
 
+        elif project == "VBP":
+            for exp in data:
+                label = f"{exp['setup']} / {exp['kr_folder']}"
+                item = QListWidgetItem(label)
+                item.setData(Qt.UserRole, f"{exp['setup']}/{exp['kr_folder']}")
+                self.exp_list.addItem(item)
+                item.setSelected(True)
+            self.loss_box.setVisible(False)
 
-def make_vbp_figure(data: list, selected_exps: list) -> go.Figure:
-    """Line chart: val_acc vs FT epoch, one trace per (setup/kr)."""
-    exp_map = {f"{e['setup']}/{e['kr_folder']}": e for e in data}
-    fig = go.Figure()
-    for key in selected_exps:
-        exp = exp_map.get(key)
-        if not exp:
-            continue
-        ft_epochs = [e for e in exp["epochs"] if e["phase"] in ("FT", "PAT")]
-        if not ft_epochs:
-            continue
-        x = [e["epoch"] for e in ft_epochs]
-        y = [e["val_acc"] for e in ft_epochs]
-        fig.add_trace(go.Scatter(
-            x=x, y=y,
-            mode="lines+markers",
-            name=key,
-            hovertemplate="epoch %{x}<br>val_acc=%{y:.4f}<extra>%{fullData.name}</extra>",
-        ))
-    fig.update_layout(
-        xaxis_title="FT Epoch",
-        yaxis_title="Val Accuracy",
-        legend_title="Setup / KR",
-        template="plotly_white",
-        margin=dict(l=50, r=20, t=40, b=50),
-    )
-    return fig
+        self.exp_list.blockSignals(False)
+        self.loss_list.blockSignals(False)
+        self._update_plot()
 
+    # ------------------------------------------------------------------
+    def _selected_exp_names(self) -> list[str]:
+        return [item.text() for item in self.exp_list.selectedItems()]
 
-def _empty_fig(msg: str = "") -> go.Figure:
-    fig = go.Figure()
-    fig.update_layout(
-        template="plotly_white",
-        annotations=[{"text": msg, "xref": "paper", "yref": "paper",
-                       "x": 0.5, "y": 0.5, "showarrow": False,
-                       "font": {"size": 14, "color": "gray"}}],
-    )
-    return fig
+    def _selected_exp_keys(self) -> list[str]:
+        """For VBP: returns 'setup/kr_folder' keys."""
+        return [
+            item.data(Qt.UserRole) or item.text()
+            for item in self.exp_list.selectedItems()
+        ]
+
+    def _selected_losses(self) -> list[str]:
+        return [item.text() for item in self.loss_list.selectedItems()]
+
+    # ------------------------------------------------------------------
+    def _update_plot(self):
+        self.figure.clear()
+
+        if self._project == "DVNR":
+            self._plot_dvnr()
+        elif self._project == "ODT":
+            self._plot_odt()
+        elif self._project == "VBP":
+            self._plot_vbp()
+
+        self.canvas.draw()
+
+    # ------------------------------------------------------------------
+    def _plot_dvnr(self):
+        selected_exps = self._selected_exp_names()
+        selected_losses = self._selected_losses()
+        if not selected_exps or not selected_losses:
+            self._empty("Select experiments and loss keys")
+            return
+
+        exp_map = {e["exp_name"]: e for e in self._data}
+        ax = self.figure.add_subplot(111)
+        for exp_name in selected_exps:
+            exp = exp_map.get(exp_name)
+            if not exp:
+                continue
+            for loss_key in selected_losses:
+                values = exp["losses"].get(loss_key, [])
+                epochs = list(range(1, len(values) + 1))
+                ax.plot(epochs, values, marker="o", markersize=3,
+                        label=f"{exp_name} / {loss_key}")
+
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Loss")
+        ax.set_title("DVNR — Loss curves")
+        ax.grid(True, alpha=0.3)
+        if len(selected_exps) * len(selected_losses) <= 10:
+            ax.legend(fontsize=8)
+
+    def _plot_odt(self):
+        selected_exps = self._selected_exp_names()
+        if not selected_exps:
+            self._empty("Select experiments")
+            return
+
+        exp_map = {e["exp_name"]: e for e in self._data}
+        ax = self.figure.add_subplot(111)
+
+        # Collect all metric keys (non-None) across selected exps
+        all_keys = []
+        for name in selected_exps:
+            exp = exp_map.get(name)
+            if exp:
+                all_keys.extend(k for k in exp["metrics"] if exp["metrics"][k] is not None)
+        keys = list(dict.fromkeys(all_keys))  # unique, preserve order
+
+        import numpy as np
+        x = np.arange(len(keys))
+        width = 0.8 / max(len(selected_exps), 1)
+        for i, name in enumerate(selected_exps):
+            exp = exp_map.get(name)
+            if not exp:
+                continue
+            vals = [exp["metrics"].get(k) or 0 for k in keys]
+            ax.bar(x + i * width, vals, width, label=name)
+
+        ax.set_xticks(x + width * (len(selected_exps) - 1) / 2)
+        ax.set_xticklabels(keys, rotation=45, ha="right", fontsize=8)
+        ax.set_ylim(0, 1.05)
+        ax.set_ylabel("Value")
+        ax.set_title("ODT — Metrics comparison")
+        ax.legend(fontsize=8)
+        ax.grid(True, axis="y", alpha=0.3)
+
+    def _plot_vbp(self):
+        selected_keys = self._selected_exp_keys()
+        if not selected_keys:
+            self._empty("Select experiments")
+            return
+
+        exp_map = {f"{e['setup']}/{e['kr_folder']}": e for e in self._data}
+        ax = self.figure.add_subplot(111)
+        for key in selected_keys:
+            exp = exp_map.get(key)
+            if not exp:
+                continue
+            ft_epochs = [e for e in exp["epochs"] if e["phase"] in ("FT", "PAT")]
+            if not ft_epochs:
+                continue
+            x = [e["epoch"] for e in ft_epochs]
+            y = [e["val_acc"] for e in ft_epochs]
+            ax.plot(x, y, marker=".", markersize=4, label=key)
+
+        ax.set_xlabel("FT Epoch")
+        ax.set_ylabel("Val Accuracy")
+        ax.set_title("VBP — Validation accuracy")
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=8)
+
+    def _empty(self, msg: str = ""):
+        ax = self.figure.add_subplot(111)
+        ax.text(0.5, 0.5, msg, ha="center", va="center",
+                transform=ax.transAxes, color="gray", fontsize=13)
+        ax.axis("off")
