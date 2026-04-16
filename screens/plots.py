@@ -3,7 +3,8 @@
 from PyQt5.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QSplitter,
     QListWidget, QListWidgetItem, QLabel, QAbstractItemView, QGroupBox,
-    QPushButton, QLineEdit,
+    QPushButton, QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView,
+    QStackedWidget,
 )
 from PyQt5.QtCore import Qt
 
@@ -118,17 +119,29 @@ class PlotsScreen(QWidget):
         selector_widget.setMaximumWidth(300)
         splitter.addWidget(selector_widget)
 
-        # ── Right: matplotlib ─────────────────────────────────────────
+        # ── Right: stacked widget (matplotlib | ODT table) ────────────
+        self.right_stack = QStackedWidget()
+
+        # Page 0: matplotlib (DVNR / VBP)
         plot_widget = QWidget()
         plot_layout = QVBoxLayout(plot_widget)
         plot_layout.setContentsMargins(0, 0, 0, 0)
-
         self.figure = Figure(tight_layout=True)
         self.canvas = FigureCanvasQTAgg(self.figure)
         self.toolbar = NavigationToolbar2QT(self.canvas, plot_widget)
         plot_layout.addWidget(self.toolbar)
         plot_layout.addWidget(self.canvas)
-        splitter.addWidget(plot_widget)
+        self.right_stack.addWidget(plot_widget)   # index 0
+
+        # Page 1: ODT table
+        self.odt_table = QTableWidget()
+        self.odt_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.odt_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.odt_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.odt_table.setSortingEnabled(True)
+        self.right_stack.addWidget(self.odt_table)  # index 1
+
+        splitter.addWidget(self.right_stack)
 
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
@@ -156,29 +169,31 @@ class PlotsScreen(QWidget):
             for exp in data:
                 item = QListWidgetItem(exp["exp_name"])
                 self.exp_list.addItem(item)
-                item.setSelected(True)
+                item.setSelected(False)
             if data:
                 for k in data[0]["losses"].keys():
                     item = QListWidgetItem(k)
                     self.loss_list.addItem(item)
                     item.setSelected(True)
             self.loss_box.setVisible(True)
+            self.right_stack.setCurrentIndex(0)
 
         elif project == "ODT":
             for exp in data:
                 item = QListWidgetItem(exp["exp_name"])
                 self.exp_list.addItem(item)
-                item.setSelected(True)
+                item.setSelected(False)
             self.loss_box.setVisible(False)
-            # Populate metric list from all keys across experiments
+            # Populate metric list; select only total_metric by default
             all_keys = []
             for exp in data:
                 all_keys.extend(k for k in exp["metrics"] if k not in all_keys)
             for k in all_keys:
                 item = QListWidgetItem(k)
                 self.metric_list.addItem(item)
-                item.setSelected(True)
+                item.setSelected(k == "total_metric")
             self.metric_box.setVisible(True)
+            self.right_stack.setCurrentIndex(1)
 
         elif project == "VBP":
             for exp in data:
@@ -186,9 +201,10 @@ class PlotsScreen(QWidget):
                 item = QListWidgetItem(label)
                 item.setData(Qt.UserRole, f"{exp['setup']}/{exp['kr_folder']}")
                 self.exp_list.addItem(item)
-                item.setSelected(True)
+                item.setSelected(False)
             self.loss_box.setVisible(False)
             self.metric_box.setVisible(False)
+            self.right_stack.setCurrentIndex(0)
 
         self.exp_list.blockSignals(False)
         self.loss_list.blockSignals(False)
@@ -255,14 +271,17 @@ class PlotsScreen(QWidget):
 
     # ── Plot update ───────────────────────────────────────────────────
     def _update_plot(self):
-        self.figure.clear()
-        if self._project == "DVNR":
-            self._plot_dvnr()
-        elif self._project == "ODT":
-            self._plot_odt()
-        elif self._project == "VBP":
-            self._plot_vbp()
-        self.canvas.draw()
+        if self._project == "ODT":
+            self.right_stack.setCurrentIndex(1)
+            self._show_odt_table()
+        else:
+            self.right_stack.setCurrentIndex(0)
+            self.figure.clear()
+            if self._project == "DVNR":
+                self._plot_dvnr()
+            elif self._project == "VBP":
+                self._plot_vbp()
+            self.canvas.draw()
 
     # ── DVNR ──────────────────────────────────────────────────────────
     def _plot_dvnr(self):
@@ -290,55 +309,56 @@ class PlotsScreen(QWidget):
             ax.legend(fontsize=8)
 
     # ── ODT ───────────────────────────────────────────────────────────
-    def _plot_odt(self):
+    def _show_odt_table(self):
         selected_exps = self._selected_exp_names()
-        if not selected_exps:
-            self._empty("Select experiments")
-            return
-        exp_map = {e["exp_name"]: e for e in self._data}
-        ax = self.figure.add_subplot(111)
-        # Use only the metrics selected (and visible) in the metric list
         keys = [self.metric_list.item(i).text()
                 for i in range(self.metric_list.count())
                 if self.metric_list.item(i).isSelected()
                 and not self.metric_list.item(i).isHidden()]
-        if not keys:
-            self._empty("Select at least one metric")
+
+        self.odt_table.setSortingEnabled(False)
+        self.odt_table.clearContents()
+
+        if not selected_exps or not keys:
+            self.odt_table.setRowCount(0)
+            self.odt_table.setColumnCount(0)
             return
 
-        import numpy as np
+        exp_map = {e["exp_name"]: e for e in self._data}
 
-        # Build matrix: rows = experiments, cols = metrics
-        matrix = []
+        # Build rows with sort key
+        sort_col = "total_metric" if "total_metric" in keys else keys[0]
+        rows = []
         for name in selected_exps:
             exp = exp_map.get(name)
-            row = []
+            vals = {}
             for k in keys:
                 v = exp["metrics"].get(k) if exp else None
-                row.append(v if isinstance(v, (int, float)) else float("nan"))
-            matrix.append(row)
-        mat = np.array(matrix, dtype=float)
+                vals[k] = v if isinstance(v, (int, float)) else None
+            sort_val = vals.get(sort_col)
+            rows.append((name, vals, sort_val))
 
-        ax = self.figure.add_subplot(111)
-        im = ax.imshow(mat, aspect="auto", cmap="RdYlGn", vmin=0, vmax=1)
+        # Sort descending by sort_col (None → bottom)
+        rows.sort(key=lambda r: (r[2] is None, -(r[2] or 0)))
 
-        # Annotate each cell with its value
-        for r in range(len(selected_exps)):
-            for c in range(len(keys)):
-                val = mat[r, c]
-                txt = f"{val:.3f}" if not np.isnan(val) else "—"
-                # Dark text on light cells, light on dark
-                brightness = val if not np.isnan(val) else 0.5
-                color = "black" if 0.25 < brightness < 0.85 else "white"
-                ax.text(c, r, txt, ha="center", va="center",
-                        fontsize=8, color=color, fontweight="bold")
+        cols = ["Experiment"] + keys
+        self.odt_table.setColumnCount(len(cols))
+        self.odt_table.setHorizontalHeaderLabels(cols)
+        self.odt_table.setRowCount(len(rows))
 
-        ax.set_xticks(range(len(keys)))
-        ax.set_xticklabels(keys, rotation=45, ha="right", fontsize=8)
-        ax.set_yticks(range(len(selected_exps)))
-        ax.set_yticklabels(selected_exps, fontsize=8)
-        ax.set_title("ODT — Metrics heatmap  (green = high, red = low)")
-        self.figure.colorbar(im, ax=ax, fraction=0.02, pad=0.02)
+        for r, (name, vals, _) in enumerate(rows):
+            name_item = QTableWidgetItem(name)
+            name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
+            self.odt_table.setItem(r, 0, name_item)
+            for c, k in enumerate(keys, start=1):
+                v = vals.get(k)
+                txt = f"{v:.4f}" if v is not None else "—"
+                cell = QTableWidgetItem(txt)
+                cell.setFlags(cell.flags() & ~Qt.ItemIsEditable)
+                cell.setTextAlignment(Qt.AlignCenter)
+                self.odt_table.setItem(r, c, cell)
+
+        self.odt_table.setSortingEnabled(True)
 
     # ── VBP ───────────────────────────────────────────────────────────
     def _plot_vbp(self):
