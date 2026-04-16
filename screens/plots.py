@@ -187,7 +187,8 @@ class PlotsScreen(QWidget):
             exp = exp_map.get(name)
             if not exp:
                 continue
-            vals = [exp["metrics"].get(k) or 0 for k in keys]
+            vals = [v if isinstance(v, (int, float)) else 0
+                    for v in (exp["metrics"].get(k) for k in keys)]
             ax.bar(x + i * width, vals, width, label=name)
 
         ax.set_xticks(x + width * (len(selected_exps) - 1) / 2)

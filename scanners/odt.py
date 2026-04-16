@@ -17,9 +17,9 @@ def _load_metrics_json(path: Path) -> dict:
     text = path.read_text()
     text = text.replace("NaN", "null").replace("nan", "null")
     raw = json.loads(text)
-    # Each value is a single-element list — unwrap to scalar
+    # Values are lists — take the first element as the scalar
     return {
-        k: (v[0] if isinstance(v, list) and len(v) == 1 else v)
+        k: (v[0] if isinstance(v, list) and len(v) > 0 else v)
         for k, v in raw.items()
     }
 
