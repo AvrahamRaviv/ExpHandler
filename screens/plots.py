@@ -174,7 +174,7 @@ class PlotsScreen(QWidget):
                 for k in data[0]["losses"].keys():
                     item = QListWidgetItem(k)
                     self.loss_list.addItem(item)
-                    item.setSelected(True)
+                    item.setSelected(k == "loss_nr")
             self.loss_box.setVisible(True)
             self.right_stack.setCurrentIndex(0)
 
