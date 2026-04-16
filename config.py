@@ -6,6 +6,13 @@ import os
 CONFIG_PATH = os.path.expanduser("~/.exp_handler_config.json")
 PROJECTS = ["DVNR", "ODT", "VBP"]
 
+# Default starting directory when opening the folder picker for the first time
+DEFAULT_PATHS = {
+    "DVNR": "/algo/NetOptimization/outputs/DOF/",
+    "ODT":  "/home/avrahamra/PycharmProjects/experiments/ODT_CP/",
+    "VBP":  "/algo/NetOptimization/outputs/VBP/MNv2_TP/",
+}
+
 
 def load_config() -> dict:
     if not os.path.exists(CONFIG_PATH):
