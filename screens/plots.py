@@ -409,6 +409,9 @@ class PlotsScreen(QWidget):
 
     # ── VBP ───────────────────────────────────────────────────────────
     def _plot_vbp(self):
+        import matplotlib.cm as mcm
+        from matplotlib.lines import Line2D
+
         selected_setups = set(self._selected_exp_names())
         selected_krs = {self.kr_list.item(i).data(Qt.UserRole)
                         for i in range(self.kr_list.count())
@@ -422,20 +425,39 @@ class PlotsScreen(QWidget):
         if not matching:
             self._empty("No experiments match selection")
             return
+
         ax = self.figure.add_subplot(111)
+
+        setups = sorted(set(e["setup"] for e in matching))
+        cmap = mcm.get_cmap("tab10")
+        setup_color = {s: cmap(i % 10) for i, s in enumerate(setups)}
+
+        plotted = False
         for exp in matching:
-            ft_epochs = [e for e in exp["epochs"] if e["phase"] in ("FT", "PAT")]
-            if not ft_epochs:
+            x = exp.get("pruned_macs_G")
+            y = exp.get("best_acc")
+            if x is None or y is None:
                 continue
-            x = [e["epoch"] for e in ft_epochs]
-            y = [e["val_acc"] for e in ft_epochs]
-            label = f"{exp['setup']} / {exp.get('keep_ratio', exp['kr_folder']):.2f}"
-            ax.plot(x, y, marker=".", markersize=4, label=label)
-        ax.set_xlabel("FT Epoch")
-        ax.set_ylabel("Val Accuracy")
-        ax.set_title("VBP — Validation accuracy")
+            color = setup_color[exp["setup"]]
+            ax.scatter(x, y, color=color, s=70, zorder=3)
+            kr = exp.get("keep_ratio", "")
+            ann = f"{kr:.2f}" if isinstance(kr, float) else str(kr)
+            ax.annotate(ann, (x, y), textcoords="offset points",
+                        xytext=(5, 4), fontsize=7)
+            plotted = True
+
+        if not plotted:
+            self._empty("No valid data (missing MACs or accuracy)")
+            return
+
+        handles = [Line2D([0], [0], marker="o", color="w",
+                          markerfacecolor=setup_color[s], markersize=8, label=s)
+                   for s in setups]
+        ax.legend(handles=handles, fontsize=8)
+        ax.set_xlabel("Pruned MACs (G)")
+        ax.set_ylabel("Best Accuracy")
+        ax.set_title("VBP — Best Accuracy vs. Pruned MACs")
         ax.grid(True, alpha=0.3)
-        ax.legend(fontsize=8)
 
     def _empty(self, msg: str = ""):
         ax = self.figure.add_subplot(111)
