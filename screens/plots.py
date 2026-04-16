@@ -82,6 +82,38 @@ class PlotsScreen(QWidget):
         loss_layout.addWidget(self.loss_list)
         selector_layout.addWidget(self.loss_box)
 
+        # Metric selector (ODT only)
+        self.metric_box = QGroupBox("Metrics")
+        self.metric_box.setVisible(False)
+        metric_layout = QVBoxLayout(self.metric_box)
+
+        metric_filter = QLineEdit()
+        metric_filter.setPlaceholderText("Filter metrics…")
+        metric_filter.setClearButtonEnabled(True)
+        metric_filter.textChanged.connect(self._apply_metric_filter)
+        metric_layout.addWidget(metric_filter)
+        self.metric_filter_input = metric_filter
+
+        metric_btn_row = QHBoxLayout()
+        metric_btn_row.setSpacing(4)
+        self.btn_metric_all = QPushButton("All")
+        self.btn_metric_all.setFixedHeight(24)
+        self.btn_metric_all.setStyleSheet("font-size: 11px;")
+        self.btn_metric_all.clicked.connect(lambda: self._select_all_list(self.metric_list))
+        self.btn_metric_none = QPushButton("None")
+        self.btn_metric_none.setFixedHeight(24)
+        self.btn_metric_none.setStyleSheet("font-size: 11px;")
+        self.btn_metric_none.clicked.connect(lambda: self._select_none_list(self.metric_list))
+        metric_btn_row.addWidget(self.btn_metric_all)
+        metric_btn_row.addWidget(self.btn_metric_none)
+        metric_layout.addLayout(metric_btn_row)
+
+        self.metric_list = QListWidget()
+        self.metric_list.setSelectionMode(QAbstractItemView.MultiSelection)
+        self.metric_list.itemSelectionChanged.connect(self._update_plot)
+        metric_layout.addWidget(self.metric_list)
+        selector_layout.addWidget(self.metric_box)
+
         selector_widget.setMinimumWidth(190)
         selector_widget.setMaximumWidth(300)
         splitter.addWidget(selector_widget)
@@ -112,10 +144,12 @@ class PlotsScreen(QWidget):
 
         self.exp_list.blockSignals(True)
         self.loss_list.blockSignals(True)
+        self.metric_list.blockSignals(True)
         self.filter_input.blockSignals(True)
 
         self.exp_list.clear()
         self.loss_list.clear()
+        self.metric_list.clear()
         self.filter_input.clear()
 
         if project == "DVNR":
@@ -136,6 +170,15 @@ class PlotsScreen(QWidget):
                 self.exp_list.addItem(item)
                 item.setSelected(True)
             self.loss_box.setVisible(False)
+            # Populate metric list from all keys across experiments
+            all_keys = []
+            for exp in data:
+                all_keys.extend(k for k in exp["metrics"] if k not in all_keys)
+            for k in all_keys:
+                item = QListWidgetItem(k)
+                self.metric_list.addItem(item)
+                item.setSelected(True)
+            self.metric_box.setVisible(True)
 
         elif project == "VBP":
             for exp in data:
@@ -145,13 +188,24 @@ class PlotsScreen(QWidget):
                 self.exp_list.addItem(item)
                 item.setSelected(True)
             self.loss_box.setVisible(False)
+            self.metric_box.setVisible(False)
 
         self.exp_list.blockSignals(False)
         self.loss_list.blockSignals(False)
+        self.metric_list.blockSignals(False)
         self.filter_input.blockSignals(False)
         self._update_plot()
 
-    # ── Filter ───────────────────────────────────────────────────────
+    # ── Filters ──────────────────────────────────────────────────────
+    def _apply_metric_filter(self, text: str):
+        text = text.strip().lower()
+        self.metric_list.blockSignals(True)
+        for i in range(self.metric_list.count()):
+            item = self.metric_list.item(i)
+            item.setHidden(text != "" and text not in item.text().lower())
+        self.metric_list.blockSignals(False)
+        self._update_plot()
+
     def _apply_filter(self, text: str):
         """Show/hide items matching the filter; preserve selection state."""
         text = text.strip().lower()
@@ -243,13 +297,14 @@ class PlotsScreen(QWidget):
             return
         exp_map = {e["exp_name"]: e for e in self._data}
         ax = self.figure.add_subplot(111)
-        all_keys = []
-        for name in selected_exps:
-            exp = exp_map.get(name)
-            if exp:
-                all_keys.extend(k for k in exp["metrics"]
-                                 if exp["metrics"][k] is not None)
-        keys = list(dict.fromkeys(all_keys))
+        # Use only the metrics selected (and visible) in the metric list
+        keys = [self.metric_list.item(i).text()
+                for i in range(self.metric_list.count())
+                if self.metric_list.item(i).isSelected()
+                and not self.metric_list.item(i).isHidden()]
+        if not keys:
+            self._empty("Select at least one metric")
+            return
 
         import numpy as np
         x = np.arange(len(keys))
