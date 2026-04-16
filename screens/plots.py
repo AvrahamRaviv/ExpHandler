@@ -224,11 +224,10 @@ class PlotsScreen(QWidget):
 
         elif project == "VBP":
             _DEFAULT_SETUPS = {
-                "global_wvw_vnr10ft200_s2",
-                "global_gv_ft200",
                 "global_gv_vnr10ft200",
                 "global_g_ft200",
                 "global_dvp_10vnr_ft200",
+                "global_dp_ft200",
             }
             # Unique setups
             seen_setups = []
