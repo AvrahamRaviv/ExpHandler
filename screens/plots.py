@@ -193,10 +193,15 @@ class PlotsScreen(QWidget):
         self.filter_input.clear()
 
         if project == "DVNR":
+            _DEFAULT_EXPS = {
+                "debug_v350",
+                "debug_MX_rdb_attn_dwds_out_int8",
+                "debug_MX_rdb_attn_dwds_out_int8_lff_int12",
+            }
             for exp in data:
                 item = QListWidgetItem(exp["exp_name"])
                 self.exp_list.addItem(item)
-                item.setSelected(False)
+                item.setSelected(exp["exp_name"] in _DEFAULT_EXPS)
             if data:
                 for k in data[0]["losses"].keys():
                     item = QListWidgetItem(k)
@@ -206,10 +211,11 @@ class PlotsScreen(QWidget):
             self.right_stack.setCurrentIndex(0)
 
         elif project == "ODT":
+            _DEFAULT_EXPS = {"infer_float", "infer_float_mx_wa_afs_int8"}
             for exp in data:
                 item = QListWidgetItem(exp["exp_name"])
                 self.exp_list.addItem(item)
-                item.setSelected(False)
+                item.setSelected(exp["exp_name"] in _DEFAULT_EXPS)
             self.loss_box.setVisible(False)
             # Populate metric list; select only total_metric by default
             all_keys = []
@@ -351,9 +357,10 @@ class PlotsScreen(QWidget):
                 continue
             for loss_key in selected_losses:
                 values = exp["losses"].get(loss_key, [])
+                legend_name = exp_name.replace("debug_MX_", "")
                 ax.plot(range(1, len(values) + 1), values,
                         marker="o", markersize=3,
-                        label=f"{exp_name} / {loss_key}")
+                        label=f"{legend_name} / {loss_key}")
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Loss")
         ax.set_title("DVNR — Loss curves")
