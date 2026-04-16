@@ -91,7 +91,7 @@ def navigate_up(n_clicks, browse_path):
 # ---------------------------------------------------------------------------
 
 @callback(
-    Output("input-root-path", "value"),
+    Output("input-root-path", "value", allow_duplicate=True),
     Input("btn-browse-use", "n_clicks"),
     State("store-browse-path", "data"),
     prevent_initial_call=True,
