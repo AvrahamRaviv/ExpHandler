@@ -57,22 +57,67 @@ def gen_layout():
             # ---- Notifications container ----
             html.Div(id="notifications-container"),
 
+            # ---- Browse path store (tracks currently-viewed directory) ----
+            dcc.Store(id="store-browse-path", data=""),
+
             # ---- Path-input modal ----
             dmc.Modal(
                 id="modal-path-input",
                 opened=False,
                 title="Set Root Experiment Folder",
                 zIndex=300,
+                size="lg",
                 children=[
                     dmc.Text("", id="modal-project-label", size="sm", color="dimmed", mb=8),
-                    dmc.TextInput(
-                        id="input-root-path",
-                        label="Folder path",
-                        placeholder="/path/to/experiments",
+
+                    # --- Manual entry row ---
+                    dmc.Group([
+                        dmc.TextInput(
+                            id="input-root-path",
+                            label="Type path directly",
+                            placeholder="/path/to/experiments",
+                            style={"flex": 1},
+                        ),
+                        dmc.Button(
+                            "Confirm",
+                            id="btn-path-confirm",
+                            color="blue",
+                            style={"marginTop": 24},
+                        ),
+                    ], align="flex-end", spacing=8),
+
+                    dmc.Divider(label="or browse", labelPosition="center", my=14),
+
+                    # --- Browser ---
+                    dmc.Group([
+                        dmc.Button(
+                            "↑ Up",
+                            id="btn-browse-up",
+                            variant="subtle",
+                            compact=True,
+                        ),
+                        dmc.Text("", id="browse-current-path",
+                                 size="xs", color="dimmed",
+                                 style={"fontFamily": "monospace", "wordBreak": "break-all"}),
+                    ], spacing=8, mb=6),
+
+                    dmc.Select(
+                        id="browse-dir-select",
+                        placeholder="— subfolders —",
+                        data=[],
+                        value=None,
+                        searchable=True,
                         style={"width": "100%"},
                     ),
-                    dmc.Space(h=12),
-                    dmc.Button("Confirm", id="btn-path-confirm", color="blue"),
+
+                    dmc.Space(h=8),
+                    dmc.Button(
+                        "Use This Folder",
+                        id="btn-browse-use",
+                        variant="light",
+                        color="teal",
+                        fullWidth=True,
+                    ),
                 ],
             ),
 
