@@ -1,8 +1,8 @@
 """Runs screen: sortable experiment table + collapsible detail panel."""
 
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QSplitter, QTableWidget, QTableWidgetItem,
-    QHeaderView, QGroupBox, QTextEdit, QLabel, QAbstractItemView,
+    QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QTableWidget, QTableWidgetItem,
+    QHeaderView, QGroupBox, QTextEdit, QLabel, QAbstractItemView, QLineEdit,
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
@@ -25,6 +25,16 @@ class RunsScreen(QWidget):
         self._project: str = ""
 
         splitter = QSplitter(Qt.Vertical)
+
+        # --- Filter bar ---
+        filter_row = QHBoxLayout()
+        filter_row.setContentsMargins(0, 0, 0, 4)
+        self.filter_input = QLineEdit()
+        self.filter_input.setPlaceholderText("Filter rows…")
+        self.filter_input.setClearButtonEnabled(True)
+        self.filter_input.textChanged.connect(self._apply_filter)
+        filter_row.addWidget(QLabel("Filter:"))
+        filter_row.addWidget(self.filter_input)
 
         # --- Table ---
         self.table = QTableWidget()
@@ -59,13 +69,26 @@ class RunsScreen(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
+        layout.addLayout(filter_row)
         layout.addWidget(splitter)
 
     # ------------------------------------------------------------------
+    def _apply_filter(self, text: str):
+        text = text.strip().lower()
+        for row in range(self.table.rowCount()):
+            match = any(
+                text in (self.table.item(row, col).text().lower() if self.table.item(row, col) else "")
+                for col in range(self.table.columnCount())
+            )
+            self.table.setRowHidden(row, not match if text else False)
+
     def load(self, project: str, data: list):
         self._project = project
         self._data = data
         self.detail_box.setVisible(False)
+        self.filter_input.blockSignals(True)
+        self.filter_input.clear()
+        self.filter_input.blockSignals(False)
 
         if project == "DVNR":
             self._load_dvnr(data)
@@ -81,15 +104,17 @@ class RunsScreen(QWidget):
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
 
-    def _add_row(self, values: list):
+    def _add_row(self, values: list, data_index: int = -1):
         row = self.table.rowCount()
         self.table.insertRow(row)
         for col, val in enumerate(values):
             item = QTableWidgetItem(_fmt(val))
             item.setTextAlignment(Qt.AlignCenter)
-            # Store raw value for sorting
             if isinstance(val, (int, float)) and val is not None:
                 item.setData(Qt.UserRole, val)
+            # Store original data index in first column for detail lookup
+            if col == 0:
+                item.setData(Qt.UserRole + 1, data_index)
             self.table.setItem(row, col, item)
 
     # ------------------------------------------------------------------
@@ -97,10 +122,10 @@ class RunsScreen(QWidget):
         loss_keys = list(data[0]["last_losses"].keys()) if data else []
         headers = ["Experiment", "Epochs"] + loss_keys
         self._set_columns(headers)
-        for exp in data:
+        for i, exp in enumerate(data):
             row = [exp["exp_name"], exp["n_epochs"]] + \
                   [exp["last_losses"].get(k) for k in loss_keys]
-            self._add_row(row)
+            self._add_row(row, i)
         self.table.resizeColumnsToContents()
 
     def _load_odt(self, data: list):
@@ -109,9 +134,9 @@ class RunsScreen(QWidget):
                   [k for k in all_keys if k not in ODT_PRIMARY]
         headers = ["Experiment"] + ordered
         self._set_columns(headers)
-        for exp in data:
+        for i, exp in enumerate(data):
             row = [exp["exp_name"]] + [exp["metrics"].get(k) for k in ordered]
-            self._add_row(row)
+            self._add_row(row, i)
         self.table.resizeColumnsToContents()
 
     def _load_vbp(self, data: list):
@@ -119,7 +144,7 @@ class RunsScreen(QWidget):
                    "Orig Acc", "Final Acc", "Best Acc",
                    "Base MACs (G)", "Pruned MACs (G)", "Retention %"]
         self._set_columns(headers)
-        for exp in data:
+        for i, exp in enumerate(data):
             orig = exp.get("original_acc")
             final = exp.get("final_acc") or exp.get("best_acc")
             retention = round(100.0 * final / orig, 2) if orig and final else None
@@ -129,7 +154,7 @@ class RunsScreen(QWidget):
                 orig, exp.get("final_acc"), exp.get("best_acc"),
                 exp.get("base_macs_G"), exp.get("pruned_macs_G"), retention,
             ]
-            self._add_row(row)
+            self._add_row(row, i)
         self.table.resizeColumnsToContents()
 
     # ------------------------------------------------------------------
@@ -138,11 +163,15 @@ class RunsScreen(QWidget):
         if not rows:
             self.detail_box.setVisible(False)
             return
-        row_idx = rows[0].row()
-        if row_idx >= len(self._data):
+        visual_row = rows[0].row()
+        first_item = self.table.item(visual_row, 0)
+        if first_item is None:
+            return
+        data_idx = first_item.data(Qt.UserRole + 1)
+        if data_idx is None or data_idx >= len(self._data):
             return
 
-        exp = self._data[row_idx]
+        exp = self._data[data_idx]
         lines = []
 
         if self._project == "DVNR":

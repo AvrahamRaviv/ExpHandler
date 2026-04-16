@@ -115,6 +115,31 @@ class PlotsScreen(QWidget):
         metric_layout.addWidget(self.metric_list)
         selector_layout.addWidget(self.metric_box)
 
+        # Keep Ratio selector (VBP only)
+        self.kr_box = QGroupBox("Keep Ratios")
+        self.kr_box.setVisible(False)
+        kr_layout = QVBoxLayout(self.kr_box)
+
+        kr_btn_row = QHBoxLayout()
+        kr_btn_row.setSpacing(4)
+        self.btn_kr_all = QPushButton("All")
+        self.btn_kr_all.setFixedHeight(24)
+        self.btn_kr_all.setStyleSheet("font-size: 11px;")
+        self.btn_kr_all.clicked.connect(lambda: self._select_all_list(self.kr_list))
+        self.btn_kr_none = QPushButton("None")
+        self.btn_kr_none.setFixedHeight(24)
+        self.btn_kr_none.setStyleSheet("font-size: 11px;")
+        self.btn_kr_none.clicked.connect(lambda: self._select_none_list(self.kr_list))
+        kr_btn_row.addWidget(self.btn_kr_all)
+        kr_btn_row.addWidget(self.btn_kr_none)
+        kr_layout.addLayout(kr_btn_row)
+
+        self.kr_list = QListWidget()
+        self.kr_list.setSelectionMode(QAbstractItemView.MultiSelection)
+        self.kr_list.itemSelectionChanged.connect(self._update_plot)
+        kr_layout.addWidget(self.kr_list)
+        selector_layout.addWidget(self.kr_box)
+
         selector_widget.setMinimumWidth(190)
         selector_widget.setMaximumWidth(300)
         splitter.addWidget(selector_widget)
@@ -158,11 +183,13 @@ class PlotsScreen(QWidget):
         self.exp_list.blockSignals(True)
         self.loss_list.blockSignals(True)
         self.metric_list.blockSignals(True)
+        self.kr_list.blockSignals(True)
         self.filter_input.blockSignals(True)
 
         self.exp_list.clear()
         self.loss_list.clear()
         self.metric_list.clear()
+        self.kr_list.clear()
         self.filter_input.clear()
 
         if project == "DVNR":
@@ -196,20 +223,40 @@ class PlotsScreen(QWidget):
             self.right_stack.setCurrentIndex(1)
 
         elif project == "VBP":
+            # Unique setups
+            seen_setups = []
             for exp in data:
-                label = f"{exp['setup']} / {exp['kr_folder']}"
-                item = QListWidgetItem(label)
-                item.setData(Qt.UserRole, f"{exp['setup']}/{exp['kr_folder']}")
+                if exp["setup"] not in seen_setups:
+                    seen_setups.append(exp["setup"])
+            for s in seen_setups:
+                item = QListWidgetItem(s)
                 self.exp_list.addItem(item)
+                item.setSelected(False)
+            # Unique keep ratios, sorted
+            seen_krs = []
+            for exp in data:
+                kr = exp.get("keep_ratio")
+                if kr is not None and kr not in seen_krs:
+                    seen_krs.append(kr)
+            seen_krs.sort()
+            for kr in seen_krs:
+                label = f"{kr:.2f}" if isinstance(kr, float) else str(kr)
+                item = QListWidgetItem(label)
+                item.setData(Qt.UserRole, kr)
+                self.kr_list.addItem(item)
                 item.setSelected(False)
             self.loss_box.setVisible(False)
             self.metric_box.setVisible(False)
+            self.kr_box.setVisible(True)
             self.right_stack.setCurrentIndex(0)
 
         self.exp_list.blockSignals(False)
         self.loss_list.blockSignals(False)
         self.metric_list.blockSignals(False)
+        self.kr_list.blockSignals(False)
         self.filter_input.blockSignals(False)
+        self.exp_label.setText("Setups" if project == "VBP" else "Experiments")
+        self.kr_box.setVisible(project == "VBP")
         self._update_plot()
 
     # ── Filters ──────────────────────────────────────────────────────
@@ -362,22 +409,28 @@ class PlotsScreen(QWidget):
 
     # ── VBP ───────────────────────────────────────────────────────────
     def _plot_vbp(self):
-        selected_keys = self._selected_exp_keys()
-        if not selected_keys:
-            self._empty("Select experiments")
+        selected_setups = set(self._selected_exp_names())
+        selected_krs = {self.kr_list.item(i).data(Qt.UserRole)
+                        for i in range(self.kr_list.count())
+                        if self.kr_list.item(i).isSelected()}
+        if not selected_setups or not selected_krs:
+            self._empty("Select setups and keep ratios")
             return
-        exp_map = {f"{e['setup']}/{e['kr_folder']}": e for e in self._data}
+        matching = [e for e in self._data
+                    if e["setup"] in selected_setups
+                    and e.get("keep_ratio") in selected_krs]
+        if not matching:
+            self._empty("No experiments match selection")
+            return
         ax = self.figure.add_subplot(111)
-        for key in selected_keys:
-            exp = exp_map.get(key)
-            if not exp:
-                continue
+        for exp in matching:
             ft_epochs = [e for e in exp["epochs"] if e["phase"] in ("FT", "PAT")]
             if not ft_epochs:
                 continue
             x = [e["epoch"] for e in ft_epochs]
             y = [e["val_acc"] for e in ft_epochs]
-            ax.plot(x, y, marker=".", markersize=4, label=key)
+            label = f"{exp['setup']} / {exp.get('keep_ratio', exp['kr_folder']):.2f}"
+            ax.plot(x, y, marker=".", markersize=4, label=label)
         ax.set_xlabel("FT Epoch")
         ax.set_ylabel("Val Accuracy")
         ax.set_title("VBP — Validation accuracy")
