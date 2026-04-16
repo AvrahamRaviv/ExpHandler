@@ -6,6 +6,9 @@ import os
 CONFIG_PATH = os.path.expanduser("~/.exp_handler_config.json")
 PROJECTS = ["DVNR", "ODT", "VBP"]
 
+# Directory where LSF writes <job_id>.out files, organised as <DD-MM-YY>/<job_id>.out
+LSF_LOG_DIR = "/algo/ws/shared/remote-gpu/log/avrahamra/"
+
 # Default starting directory when opening the folder picker for the first time
 DEFAULT_PATHS = {
     "DVNR": "/algo/NetOptimization/outputs/DOF/",

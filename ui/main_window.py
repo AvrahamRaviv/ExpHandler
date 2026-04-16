@@ -12,6 +12,7 @@ from scanners.odt import scan_odt
 from scanners.vbp import scan_vbp
 from screens.runs import RunsScreen
 from screens.plots import PlotsScreen
+from screens.monitor import MonitorScreen
 from ui.sidebar import Sidebar
 
 _SCANNERS = {"DVNR": scan_dvnr, "ODT": scan_odt, "VBP": scan_vbp}
@@ -47,8 +48,10 @@ class MainWindow(QMainWindow):
         self.tabs.setTabPosition(QTabWidget.North)
         self.runs_screen = RunsScreen()
         self.plots_screen = PlotsScreen()
+        self.monitor_screen = MonitorScreen()
         self.tabs.addTab(self.runs_screen, "Runs")
         self.tabs.addTab(self.plots_screen, "Plots")
+        self.tabs.addTab(self.monitor_screen, "Monitor")
         h_layout.addWidget(self.tabs, stretch=1)
 
         self.status = QStatusBar()
@@ -112,6 +115,7 @@ class MainWindow(QMainWindow):
         root_path = get_project_path(project) or ""
         self.runs_screen.load(project, data)
         self.plots_screen.load(project, data)
+        self.monitor_screen.load(project, data)
         n = len(data)
         self.status.showMessage(
             f"{project}  —  {n} experiment{'s' if n != 1 else ''} loaded  ({root_path})"
