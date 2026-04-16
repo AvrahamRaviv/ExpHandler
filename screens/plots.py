@@ -223,6 +223,13 @@ class PlotsScreen(QWidget):
             self.right_stack.setCurrentIndex(1)
 
         elif project == "VBP":
+            _DEFAULT_SETUPS = {
+                "global_wvw_vnr10ft200_s2",
+                "global_gv_ft200",
+                "global_gv_vnr10ft200",
+                "global_g_ft200",
+                "global_dvp_10vnr_ft200",
+            }
             # Unique setups
             seen_setups = []
             for exp in data:
@@ -231,7 +238,7 @@ class PlotsScreen(QWidget):
             for s in seen_setups:
                 item = QListWidgetItem(s)
                 self.exp_list.addItem(item)
-                item.setSelected(False)
+                item.setSelected(s in _DEFAULT_SETUPS)
             # Unique keep ratios, sorted
             seen_krs = []
             for exp in data:
