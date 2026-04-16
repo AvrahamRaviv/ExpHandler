@@ -307,22 +307,38 @@ class PlotsScreen(QWidget):
             return
 
         import numpy as np
-        x = np.arange(len(keys))
-        width = 0.8 / max(len(selected_exps), 1)
-        for i, name in enumerate(selected_exps):
+
+        # Build matrix: rows = experiments, cols = metrics
+        matrix = []
+        for name in selected_exps:
             exp = exp_map.get(name)
-            if not exp:
-                continue
-            vals = [v if isinstance(v, (int, float)) else 0
-                    for v in (exp["metrics"].get(k) for k in keys)]
-            ax.bar(x + i * width, vals, width, label=name)
-        ax.set_xticks(x + width * (len(selected_exps) - 1) / 2)
+            row = []
+            for k in keys:
+                v = exp["metrics"].get(k) if exp else None
+                row.append(v if isinstance(v, (int, float)) else float("nan"))
+            matrix.append(row)
+        mat = np.array(matrix, dtype=float)
+
+        ax = self.figure.add_subplot(111)
+        im = ax.imshow(mat, aspect="auto", cmap="RdYlGn", vmin=0, vmax=1)
+
+        # Annotate each cell with its value
+        for r in range(len(selected_exps)):
+            for c in range(len(keys)):
+                val = mat[r, c]
+                txt = f"{val:.3f}" if not np.isnan(val) else "—"
+                # Dark text on light cells, light on dark
+                brightness = val if not np.isnan(val) else 0.5
+                color = "black" if 0.25 < brightness < 0.85 else "white"
+                ax.text(c, r, txt, ha="center", va="center",
+                        fontsize=8, color=color, fontweight="bold")
+
+        ax.set_xticks(range(len(keys)))
         ax.set_xticklabels(keys, rotation=45, ha="right", fontsize=8)
-        ax.set_ylim(0, 1.05)
-        ax.set_ylabel("Value")
-        ax.set_title("ODT — Metrics comparison")
-        ax.legend(fontsize=8)
-        ax.grid(True, axis="y", alpha=0.3)
+        ax.set_yticks(range(len(selected_exps)))
+        ax.set_yticklabels(selected_exps, fontsize=8)
+        ax.set_title("ODT — Metrics heatmap  (green = high, red = low)")
+        self.figure.colorbar(im, ax=ax, fraction=0.02, pad=0.02)
 
     # ── VBP ───────────────────────────────────────────────────────────
     def _plot_vbp(self):
