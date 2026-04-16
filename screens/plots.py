@@ -447,8 +447,7 @@ class PlotsScreen(QWidget):
             color = setup_color[exp["setup"]]
             ax.scatter(x, y, color=color, s=70, zorder=3)
             kr = exp.get("keep_ratio", "")
-            ann = f"{kr:.2f}" if isinstance(kr, float) else str(kr)
-            ax.annotate(ann, (x, y), textcoords="offset points",
+            ax.annotate(f"{y:.3f}", (x, y), textcoords="offset points",
                         xytext=(5, 4), fontsize=7)
             plotted = True
 
