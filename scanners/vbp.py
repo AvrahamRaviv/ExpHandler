@@ -121,6 +121,11 @@ def _parse_summary(text: str, epochs: list) -> dict:
     return summary
 
 
+def _fill_mid_run_fallbacks(summary: dict, step_retentions: list, epochs: list):
+    if "pruned_macs_G" not in summary and step_retentions:
+        summary["pruned_macs_G"] = step_retentions[-1]["macs_G"]
+
+
 def _parse_log(log_path: str) -> dict:
     with open(log_path) as f:
         text = f.read()
@@ -128,6 +133,8 @@ def _parse_log(log_path: str) -> dict:
     all_params = _parse_hyperparams(text)
     epochs = _parse_epochs(text)
     summary = _parse_summary(text, epochs)
+    step_retentions = _parse_step_retentions(text)
+    _fill_mid_run_fallbacks(summary, step_retentions, epochs)
 
     # Infer keep_ratio from folder name if not in log
     if "keep_ratio" not in all_params:
@@ -139,7 +146,7 @@ def _parse_log(log_path: str) -> dict:
     return {
         "hyperparams": all_params,
         "epochs": epochs,
-        "step_retentions": _parse_step_retentions(text),
+        "step_retentions": step_retentions,
         "summary": summary,
     }
 
