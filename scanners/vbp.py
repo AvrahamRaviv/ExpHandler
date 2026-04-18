@@ -95,9 +95,13 @@ def _parse_summary(text: str, epochs: list) -> dict:
     if m:
         summary["final_acc"] = float(m.group(1))
 
-    ft_accs = [e["val_acc"] for e in epochs if e["phase"].upper() in ("FT", "PAT")]
+    ft_accs = [e["val_acc"] for e in epochs if e["phase"].upper() == "FT"]
+    pat_accs = [e["val_acc"] for e in epochs if e["phase"].upper() == "PAT"]
     if ft_accs:
-        summary["best_acc"] = max(ft_accs)
+        summary["best_acc_ft"] = max(ft_accs)
+        summary["best_acc"] = summary["best_acc_ft"]
+    elif pat_accs:
+        summary["best_acc"] = max(pat_accs)
 
     m = re.search(r"Baseline:\s*([\d.]+)G MACs,\s*([\d.]+)M params", text)
     if m:
