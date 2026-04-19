@@ -12,6 +12,7 @@ from config import PROJECTS
 class Sidebar(QWidget):
     project_selected = pyqtSignal(str)
     change_path_requested = pyqtSignal(str)
+    refresh_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -66,6 +67,18 @@ class Sidebar(QWidget):
             layout.addLayout(row)
 
         layout.addStretch()
+
+        refresh_btn = QPushButton("🔄 Refresh")
+        refresh_btn.setFixedHeight(30)
+        refresh_btn.setToolTip("Re-scan the active project folder")
+        refresh_btn.setStyleSheet(
+            "QPushButton { background-color: transparent; color: #333; "
+            "border: 1px solid #ccc; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #e0e0e0; }"
+        )
+        refresh_btn.clicked.connect(self.refresh_requested.emit)
+        layout.addWidget(refresh_btn)
+
         self.setStyleSheet("background-color: #f5f5f5;")
 
     def _on_click(self, project: str):

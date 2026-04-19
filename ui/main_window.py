@@ -37,6 +37,7 @@ class MainWindow(QMainWindow):
         self.sidebar = Sidebar()
         self.sidebar.project_selected.connect(self._on_project_selected)
         self.sidebar.change_path_requested.connect(self._on_change_path)
+        self.sidebar.refresh_requested.connect(self._on_refresh)
         h_layout.addWidget(self.sidebar)
 
         sep = QWidget()
@@ -85,6 +86,19 @@ class MainWindow(QMainWindow):
         self._loaded[project] = None  # invalidate cache
         self._active_project = project
         self.sidebar.set_active_silent(project)
+        self._scan(project, root_path)
+        self._display(project)
+
+    # ── Refresh button ───────────────────────────────────────────────
+    def _on_refresh(self):
+        project = self._active_project
+        if not project:
+            self.status.showMessage("Select a project first.")
+            return
+        root_path = get_project_path(project)
+        if not root_path or not os.path.isdir(root_path):
+            return
+        self._loaded[project] = None
         self._scan(project, root_path)
         self._display(project)
 
