@@ -42,7 +42,7 @@ class MainWindow(QMainWindow):
 
         sep = QWidget()
         sep.setFixedWidth(1)
-        sep.setStyleSheet("background-color: #d0d0d0;")
+        sep.setStyleSheet("background-color: #2d3748;")
         h_layout.addWidget(sep)
 
         self.tabs = QTabWidget()

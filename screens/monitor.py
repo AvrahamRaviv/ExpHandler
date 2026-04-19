@@ -14,14 +14,15 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QBrush, QColor, QFont
 
 from config import LSF_LOG_DIR
+from ui.theme import C_SUCCESS, C_RUN, C_ERROR, C_PENDING as _C_PENDING_HEX, C_UNKNOWN as _C_UNKNOWN_HEX
 
 # ── Colours ───────────────────────────────────────────────────────────────────
 
-_C_COMPLETE    = QColor("#28a745")
-_C_IN_PROGRESS = QColor("#fd7e14")
-_C_CRASH       = QColor("#dc3545")
-_C_PENDING     = QColor("#888888")
-_C_UNKNOWN     = QColor("#aaaaaa")
+_C_COMPLETE    = QColor(C_SUCCESS)
+_C_IN_PROGRESS = QColor(C_RUN)
+_C_CRASH       = QColor(C_ERROR)
+_C_PENDING     = QColor(_C_PENDING_HEX)
+_C_UNKNOWN     = QColor(_C_UNKNOWN_HEX)
 
 _LSF_STAT_MAP = {
     "RUN":   ("In Progress", _C_IN_PROGRESS),
@@ -242,7 +243,7 @@ class MonitorScreen(QWidget):
         top.addWidget(self.filter_input, stretch=1)
 
         self.status_label = QLabel("")
-        self.status_label.setStyleSheet("color: #555; font-size: 11px;")
+        self.status_label.setStyleSheet("font-size: 11px;")
         top.addWidget(self.status_label)
 
         self.refresh_btn = QPushButton("Refresh")
@@ -265,10 +266,6 @@ class MonitorScreen(QWidget):
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
         self.table.setWordWrap(False)
-        self.table.setStyleSheet(
-            "QTableWidget { font-family: monospace; font-size: 12px; }"
-            "QHeaderView::section { background: #f0f0f0; font-weight: bold; padding: 4px; }"
-        )
         self.table.itemSelectionChanged.connect(self._on_row_selected)
         splitter.addWidget(self.table)
 
@@ -284,10 +281,6 @@ class MonitorScreen(QWidget):
         self.args_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.args_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.args_table.verticalHeader().setVisible(False)
-        self.args_table.setStyleSheet(
-            "QTableWidget { font-family: monospace; font-size: 12px; }"
-            "QHeaderView::section { background: #f0f0f0; font-weight: bold; padding: 4px; }"
-        )
         self.args_table.cellChanged.connect(self._update_cmd_preview)
         launch_layout.addWidget(self.args_table)
 
@@ -295,17 +288,17 @@ class MonitorScreen(QWidget):
         bottom_row.setSpacing(8)
 
         self.cmd_preview = QLabel("")
-        self.cmd_preview.setStyleSheet("font-family: monospace; font-size: 10px; color: #555;")
+        self.cmd_preview.setStyleSheet("font-family: monospace; font-size: 11px;")
         self.cmd_preview.setWordWrap(True)
         bottom_row.addWidget(self.cmd_preview, stretch=1)
 
         self.launch_btn = QPushButton("Launch")
         self.launch_btn.setFixedWidth(90)
         self.launch_btn.setStyleSheet(
-            "QPushButton { background-color: #0d6efd; color: white; "
-            "border-radius: 4px; font-weight: bold; }"
-            "QPushButton:hover { background-color: #0b5ed7; }"
-            "QPushButton:disabled { background-color: #aaa; }"
+            "QPushButton { background-color: #06b6d4; color: #0a0e1a; "
+            "border: none; border-radius: 6px; font-weight: 700; }"
+            "QPushButton:hover { background-color: #22d3ee; }"
+            "QPushButton:disabled { background-color: #1f2937; color: #4b5563; border: none; }"
         )
         self.launch_btn.clicked.connect(self._on_launch)
         bottom_row.addWidget(self.launch_btn)
@@ -416,7 +409,7 @@ class MonitorScreen(QWidget):
         self.args_table.clearContents()
         self.args_table.setRowCount(len(arg_rows))
 
-        grey = QColor("#f0f0f0")
+        grey = QColor("#1f2937")
         for r, (flag, value) in enumerate(arg_rows):
             flag_item = QTableWidgetItem(flag)
             flag_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)

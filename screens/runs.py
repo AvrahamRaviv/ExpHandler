@@ -46,10 +46,6 @@ class RunsScreen(QWidget):
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
-        self.table.setStyleSheet(
-            "QTableWidget { font-family: monospace; font-size: 12px; }"
-            "QHeaderView::section { background: #f0f0f0; font-weight: bold; padding: 4px; }"
-        )
         self.table.itemSelectionChanged.connect(self._on_row_selected)
         splitter.addWidget(self.table)
 
@@ -59,7 +55,6 @@ class RunsScreen(QWidget):
         detail_layout = QVBoxLayout(self.detail_box)
         self.detail_text = QTextEdit()
         self.detail_text.setReadOnly(True)
-        self.detail_text.setFont(QFont("monospace", 11))
         self.detail_text.setMaximumHeight(200)
         detail_layout.addWidget(self.detail_text)
         splitter.addWidget(self.detail_box)

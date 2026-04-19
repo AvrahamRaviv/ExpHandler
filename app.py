@@ -15,12 +15,14 @@ if _root not in sys.path:
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtGui import QIcon
 from ui.main_window import MainWindow
+from ui.theme import QSS
 
 
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("ExpHandler")
     app.setStyle("Fusion")  # consistent look on Linux and Mac
+    app.setStyleSheet(QSS)
 
     window = MainWindow()
     window.show()
