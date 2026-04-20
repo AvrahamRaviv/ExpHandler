@@ -13,7 +13,7 @@ LSF_LOG_DIR = "/algo/ws/shared/remote-gpu/log/avrahamra/"
 DEFAULT_PATHS = {
     "DVNR": "/algo/NetOptimization/outputs/DOF/",
     "ODT":  "/home/avrahamra/PycharmProjects/experiments/ODT_CP/",
-    "VBP":  "/algo/NetOptimization/outputs/VBP/MNv2_TP/",
+    "VBP":  "/algo/NetOptimization/outputs/VBP/",
 }
 
 
