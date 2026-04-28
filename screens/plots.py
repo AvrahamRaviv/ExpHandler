@@ -452,9 +452,10 @@ class PlotsScreen(QWidget):
             if x is None or y is None:
                 continue
             color = setup_color[exp["setup"]]
-            ax.scatter(x, y, color=color, s=70, zorder=3)
+            y_pct = y * 100
+            ax.scatter(x, y_pct, color=color, s=70, zorder=3)
             kr = exp.get("keep_ratio", "")
-            ax.annotate(f"{y:.3f}", (x, y), textcoords="offset points",
+            ax.annotate(f"{y_pct:.3f}", (x, y_pct), textcoords="offset points",
                         xytext=(5, 4), fontsize=7)
             plotted = True
 
@@ -467,7 +468,7 @@ class PlotsScreen(QWidget):
                    for s in setups]
         ax.legend(handles=handles, fontsize=8)
         ax.set_xlabel("Pruned MACs (G)")
-        ax.set_ylabel("Best Accuracy")
+        ax.set_ylabel("Best Accuracy (%)")
         ax.set_title("VBP — Best Accuracy vs. Pruned MACs")
         ax.grid(True, alpha=0.3)
 
