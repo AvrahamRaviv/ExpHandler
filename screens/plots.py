@@ -455,7 +455,7 @@ class PlotsScreen(QWidget):
             y_pct = y * 100
             ax.scatter(x, y_pct, color=color, s=70, zorder=3)
             kr = exp.get("keep_ratio", "")
-            ax.annotate(f"{y_pct:.3f}", (x, y_pct), textcoords="offset points",
+            ax.annotate(f"{y_pct:.2f}", (x, y_pct), textcoords="offset points",
                         xytext=(5, 4), fontsize=7)
             plotted = True
 
