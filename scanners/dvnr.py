@@ -59,7 +59,7 @@ def scan_dvnr(root_dir: str) -> list:
         last_losses = {k: v[-1] for k, v in losses.items() if v}
 
         results.append({
-            "exp_name": exp_dir.name,
+            "exp_name": exp_dir.name.replace("debug_MX_", "").replace("debug_", ""),
             "n_epochs": n_epochs,
             "losses": losses,
             "last_losses": last_losses,
