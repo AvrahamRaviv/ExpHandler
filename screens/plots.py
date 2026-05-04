@@ -526,6 +526,12 @@ class PlotsScreen(QWidget):
             kr_label = f"{kr:.2f}" if isinstance(kr, float) else str(kr)
             ax.plot(xs, ys, marker="o", markersize=3, color=color,
                     label=f"{exp['setup']} / kr={kr_label}")
+            retentions = exp.get("step_retentions") or []
+            if retentions:
+                ret_acc = retentions[-1].get("acc")
+                if ret_acc is not None:
+                    ax.scatter([0], [ret_acc * 100], color=color, marker="x",
+                               s=50, zorder=4)
             plotted = True
 
         if not plotted:
