@@ -4,7 +4,7 @@ from PyQt5.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QSplitter,
     QListWidget, QListWidgetItem, QLabel, QAbstractItemView, QGroupBox,
     QPushButton, QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView,
-    QStackedWidget,
+    QStackedWidget, QComboBox,
 )
 from PyQt5.QtCore import Qt
 
@@ -114,6 +114,17 @@ class PlotsScreen(QWidget):
         self.metric_list.itemSelectionChanged.connect(self._update_plot)
         metric_layout.addWidget(self.metric_list)
         selector_layout.addWidget(self.metric_box)
+
+        # Plot type selector (VBP only)
+        self.vbp_plot_type_box = QGroupBox("Plot type")
+        self.vbp_plot_type_box.setVisible(False)
+        vbp_pt_layout = QVBoxLayout(self.vbp_plot_type_box)
+        self.vbp_plot_type = QComboBox()
+        self.vbp_plot_type.addItem("Acc vs MACs", "acc_vs_macs")
+        self.vbp_plot_type.addItem("FT Curves", "ft_curves")
+        self.vbp_plot_type.currentIndexChanged.connect(self._update_plot)
+        vbp_pt_layout.addWidget(self.vbp_plot_type)
+        selector_layout.addWidget(self.vbp_plot_type_box)
 
         # Keep Ratio selector (VBP only)
         self.kr_box = QGroupBox("Keep Ratios")
@@ -269,6 +280,7 @@ class PlotsScreen(QWidget):
         self.filter_input.blockSignals(False)
         self.exp_label.setText("Setups" if project == "VBP" else "Experiments")
         self.kr_box.setVisible(project == "VBP")
+        self.vbp_plot_type_box.setVisible(project == "VBP")
         self._update_plot()
 
     # ── Filters ──────────────────────────────────────────────────────
@@ -422,6 +434,13 @@ class PlotsScreen(QWidget):
 
     # ── VBP ───────────────────────────────────────────────────────────
     def _plot_vbp(self):
+        plot_type = self.vbp_plot_type.currentData()
+        if plot_type == "ft_curves":
+            self._plot_vbp_ft_curves()
+        else:
+            self._plot_vbp_acc_vs_macs()
+
+    def _plot_vbp_acc_vs_macs(self):
         import matplotlib.cm as mcm
         from matplotlib.lines import Line2D
 
@@ -471,6 +490,54 @@ class PlotsScreen(QWidget):
         ax.set_ylabel("Best Accuracy (%)")
         ax.set_title("VBP — Best Accuracy vs. Pruned MACs")
         ax.grid(True, alpha=0.3)
+
+    def _plot_vbp_ft_curves(self):
+        import matplotlib.cm as mcm
+
+        selected_setups = set(self._selected_exp_names())
+        selected_krs = {self.kr_list.item(i).data(Qt.UserRole)
+                        for i in range(self.kr_list.count())
+                        if self.kr_list.item(i).isSelected()}
+        if not selected_setups or not selected_krs:
+            self._empty("Select setups and keep ratios")
+            return
+        matching = [e for e in self._data
+                    if e["setup"] in selected_setups
+                    and e.get("keep_ratio") in selected_krs]
+        if not matching:
+            self._empty("No experiments match selection")
+            return
+
+        ax = self.figure.add_subplot(111)
+
+        setups = sorted(set(e["setup"] for e in matching))
+        cmap = mcm.get_cmap("tab10")
+        setup_color = {s: cmap(i % 10) for i, s in enumerate(setups)}
+
+        plotted = False
+        for exp in matching:
+            ft_eps = [e for e in exp.get("epochs", []) if e["phase"].upper() == "FT"]
+            if not ft_eps:
+                continue
+            xs = [e["epoch"] for e in ft_eps]
+            ys = [e["val_acc"] * 100 for e in ft_eps]
+            color = setup_color[exp["setup"]]
+            kr = exp.get("keep_ratio", "")
+            kr_label = f"{kr:.2f}" if isinstance(kr, float) else str(kr)
+            ax.plot(xs, ys, marker="o", markersize=3, color=color,
+                    label=f"{exp['setup']} / kr={kr_label}")
+            plotted = True
+
+        if not plotted:
+            self._empty("No FT epoch data in selection")
+            return
+
+        ax.set_xlabel("Epoch (FT)")
+        ax.set_ylabel("Val Accuracy (%)")
+        ax.set_title("VBP — FT Validation Accuracy Curves")
+        ax.grid(True, alpha=0.3)
+        if len(matching) <= 12:
+            ax.legend(fontsize=7)
 
     def _empty(self, msg: str = ""):
         ax = self.figure.add_subplot(111)
