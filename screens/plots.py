@@ -122,8 +122,19 @@ class PlotsScreen(QWidget):
         self.vbp_plot_type = QComboBox()
         self.vbp_plot_type.addItem("Acc vs MACs", "acc_vs_macs")
         self.vbp_plot_type.addItem("FT Curves", "ft_curves")
-        self.vbp_plot_type.currentIndexChanged.connect(self._update_plot)
+        self.vbp_plot_type.currentIndexChanged.connect(self._on_vbp_plot_type_changed)
         vbp_pt_layout.addWidget(self.vbp_plot_type)
+        max_epoch_row = QHBoxLayout()
+        max_epoch_row.setSpacing(4)
+        self.vbp_max_epoch_label = QLabel("Max epoch:")
+        self.vbp_max_epoch = QLineEdit()
+        self.vbp_max_epoch.setPlaceholderText("all")
+        self.vbp_max_epoch.setFixedWidth(70)
+        self.vbp_max_epoch.editingFinished.connect(self._update_plot)
+        max_epoch_row.addWidget(self.vbp_max_epoch_label)
+        max_epoch_row.addWidget(self.vbp_max_epoch)
+        max_epoch_row.addStretch()
+        vbp_pt_layout.addLayout(max_epoch_row)
         selector_layout.addWidget(self.vbp_plot_type_box)
 
         # Keep Ratio selector (VBP only)
@@ -281,7 +292,18 @@ class PlotsScreen(QWidget):
         self.exp_label.setText("Setups" if project == "VBP" else "Experiments")
         self.kr_box.setVisible(project == "VBP")
         self.vbp_plot_type_box.setVisible(project == "VBP")
+        self._update_vbp_max_epoch_visibility()
         self._update_plot()
+
+    def _on_vbp_plot_type_changed(self):
+        self._update_vbp_max_epoch_visibility()
+        self._update_plot()
+
+    def _update_vbp_max_epoch_visibility(self):
+        ft = (self._project == "VBP"
+              and self.vbp_plot_type.currentData() == "ft_curves")
+        self.vbp_max_epoch_label.setVisible(ft)
+        self.vbp_max_epoch.setVisible(ft)
 
     # ── Filters ──────────────────────────────────────────────────────
     def _apply_metric_filter(self, text: str):
@@ -514,9 +536,17 @@ class PlotsScreen(QWidget):
         cmap = mcm.get_cmap("tab10")
         setup_color = {s: cmap(i % 10) for i, s in enumerate(setups)}
 
+        max_epoch_text = self.vbp_max_epoch.text().strip()
+        try:
+            max_epoch = int(max_epoch_text) if max_epoch_text else None
+        except ValueError:
+            max_epoch = None
+
         plotted = False
         for exp in matching:
             ft_eps = [e for e in exp.get("epochs", []) if e["phase"].upper() == "FT"]
+            if max_epoch is not None:
+                ft_eps = [e for e in ft_eps if e["epoch"] <= max_epoch]
             if not ft_eps:
                 continue
             xs = [e["epoch"] for e in ft_eps]
