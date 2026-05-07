@@ -199,6 +199,26 @@ class PlotsScreen(QWidget):
 
     # ── Load ─────────────────────────────────────────────────────────
     def load(self, project: str, data: list):
+        # Snapshot selection so refresh / re-load preserves user choices
+        same_project = (project == self._project)
+        prev_exps: set = set()
+        prev_losses: set = set()
+        prev_metrics: set = set()
+        prev_krs: set = set()
+        if same_project:
+            prev_exps = {self.exp_list.item(i).text()
+                         for i in range(self.exp_list.count())
+                         if self.exp_list.item(i).isSelected()}
+            prev_losses = {self.loss_list.item(i).text()
+                           for i in range(self.loss_list.count())
+                           if self.loss_list.item(i).isSelected()}
+            prev_metrics = {self.metric_list.item(i).text()
+                            for i in range(self.metric_list.count())
+                            if self.metric_list.item(i).isSelected()}
+            prev_krs = {self.kr_list.item(i).data(Qt.UserRole)
+                        for i in range(self.kr_list.count())
+                        if self.kr_list.item(i).isSelected()}
+
         self._project = project
         self._data = data
 
@@ -220,24 +240,27 @@ class PlotsScreen(QWidget):
                 "debug_MX_rdb_attn_dwds_out_int8",
                 "debug_MX_rdb_attn_dwds_out_int8_lff_int12",
             }
+            exp_select = prev_exps if prev_exps else _DEFAULT_EXPS
             for exp in data:
                 item = QListWidgetItem(exp["exp_name"])
                 self.exp_list.addItem(item)
-                item.setSelected(exp["exp_name"] in _DEFAULT_EXPS)
+                item.setSelected(exp["exp_name"] in exp_select)
             if data:
                 for k in data[0]["losses"].keys():
                     item = QListWidgetItem(k)
                     self.loss_list.addItem(item)
-                    item.setSelected(k == "loss_nr")
+                    item.setSelected(k in prev_losses if prev_losses
+                                     else k == "loss_nr")
             self.loss_box.setVisible(True)
             self.right_stack.setCurrentIndex(0)
 
         elif project == "ODT":
             _DEFAULT_EXPS = {"infer_float", "infer_float_mx_wa_afs_int8"}
+            exp_select = prev_exps if prev_exps else _DEFAULT_EXPS
             for exp in data:
                 item = QListWidgetItem(exp["exp_name"])
                 self.exp_list.addItem(item)
-                item.setSelected(exp["exp_name"] in _DEFAULT_EXPS)
+                item.setSelected(exp["exp_name"] in exp_select)
             self.loss_box.setVisible(False)
             # Populate metric list; select only total_metric by default
             all_keys = []
@@ -246,7 +269,8 @@ class PlotsScreen(QWidget):
             for k in all_keys:
                 item = QListWidgetItem(k)
                 self.metric_list.addItem(item)
-                item.setSelected(k == "total_metric")
+                item.setSelected(k in prev_metrics if prev_metrics
+                                 else k == "total_metric")
             self.metric_box.setVisible(True)
             self.right_stack.setCurrentIndex(1)
 
@@ -257,6 +281,7 @@ class PlotsScreen(QWidget):
                 "global_dvp_10vnr_ft200",
                 "global_dp_ft200",
             }
+            setup_select = prev_exps if prev_exps else _DEFAULT_SETUPS
             # Unique setups
             seen_setups = []
             for exp in data:
@@ -265,7 +290,7 @@ class PlotsScreen(QWidget):
             for s in seen_setups:
                 item = QListWidgetItem(s)
                 self.exp_list.addItem(item)
-                item.setSelected(s in _DEFAULT_SETUPS)
+                item.setSelected(s in setup_select)
             # Unique keep ratios, sorted
             seen_krs = []
             for exp in data:
@@ -278,7 +303,7 @@ class PlotsScreen(QWidget):
                 item = QListWidgetItem(label)
                 item.setData(Qt.UserRole, kr)
                 self.kr_list.addItem(item)
-                item.setSelected(False)
+                item.setSelected(kr in prev_krs)
             self.loss_box.setVisible(False)
             self.metric_box.setVisible(False)
             self.kr_box.setVisible(True)
