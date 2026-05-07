@@ -16,6 +16,12 @@ DEFAULT_PATHS = {
     "VBP":  "/algo/NetOptimization/outputs/VBP/",
 }
 
+# Default path to vbp_imagenet_pat.py used by the VBP Wizard.
+DEFAULT_TORCH_PRUNING_SCRIPT = (
+    "/home/avrahamra/PycharmProjects/sirc-torch-pruning/"
+    "benchmarks/vbp/vbp_imagenet_pat.py"
+)
+
 
 def load_config() -> dict:
     if not os.path.exists(CONFIG_PATH):
@@ -39,3 +45,15 @@ def save_project_path(project: str, path: str):
 def get_project_path(project: str):
     cfg = load_config()
     return cfg.get(project, {}).get("root_path", None)
+
+
+def get_torch_pruning_script() -> str:
+    cfg = load_config()
+    return cfg.get("torch_pruning_script") or DEFAULT_TORCH_PRUNING_SCRIPT
+
+
+def save_torch_pruning_script(path: str):
+    cfg = load_config()
+    cfg["torch_pruning_script"] = path
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(cfg, f, indent=2)

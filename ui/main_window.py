@@ -14,6 +14,7 @@ from screens.runs import RunsScreen
 from screens.plots import PlotsScreen
 from screens.monitor import MonitorScreen
 from screens.launcher import LauncherScreen
+from screens.vbp_wizard import VBPWizardScreen
 from ui.sidebar import Sidebar
 
 _SCANNERS = {"DVNR": scan_dvnr, "ODT": scan_odt, "VBP": scan_vbp}
@@ -69,11 +70,14 @@ class MainWindow(QMainWindow):
         self.plots_screen = PlotsScreen()
         self.monitor_screen = MonitorScreen()
         self.launcher_screen = LauncherScreen()
+        self.wizard_screen = VBPWizardScreen()
         self.tabs.addTab(self.runs_screen, "Runs")
         self.tabs.addTab(self.plots_screen, "Plots")
         self.tabs.addTab(self.monitor_screen, "Monitor")
         self._launcher_tab_idx = self.tabs.addTab(self.launcher_screen, "Launcher")
+        self._wizard_tab_idx = self.tabs.addTab(self.wizard_screen, "VBP Wizard")
         self.tabs.setTabVisible(self._launcher_tab_idx, False)
+        self.tabs.setTabVisible(self._wizard_tab_idx, False)
         content_layout.addWidget(self.tabs, stretch=1)
 
         h_layout.addWidget(content, stretch=1)
@@ -205,6 +209,7 @@ class MainWindow(QMainWindow):
         self.monitor_screen.load("VBP", data)
         self.launcher_screen.load(subtype, root_path)
         self.tabs.setTabVisible(self._launcher_tab_idx, True)
+        self.tabs.setTabVisible(self._wizard_tab_idx, True)
         n = len(data)
         self.status.showMessage(
             f"{key}  —  {n} experiment{'s' if n != 1 else ''} loaded  ({full_path})"
@@ -229,6 +234,7 @@ class MainWindow(QMainWindow):
     def _hide_subtype_bar(self):
         self.subtype_bar.setVisible(False)
         self.tabs.setTabVisible(self._launcher_tab_idx, False)
+        self.tabs.setTabVisible(self._wizard_tab_idx, False)
 
     # ── Helpers ──────────────────────────────────────────────────────
     def _scan(self, project: str, root_path: str):
