@@ -1,21 +1,13 @@
 """VBP Run Wizard.
 
-4-step state machine that builds a python invocation of vbp_imagenet_pat.py.
-Flag names mirror that script's argparse (paste 2026-05-07).
-
-    1. Architecture        (model_type / cnn_arch / model_name + arch extras)
-    2. Criterion           (criterion + importance_mode + extras)
-    3. Regularization      (sparse_mode block)
-    4. Fine-tuning / PAT / KD
-
-Final page shows the assembled command, with Copy / Run / Save preset / Load.
-Run mode is blocking subprocess.run; output mirrored to
-<repo>/logs/<arch>_<criterion>_<timestamp>.log.
+Single-page sectioned form (4 QGroupBoxes — Architecture / Criterion /
+Regularization / Fine-tuning) for building a vbp_imagenet_pat.py invocation.
+Below the form: live command preview + Run (blocking, dispatched via
+run_docker_gpu.sh wrapper, same as the per-subtype Launcher) + Save/Load .sh.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import shlex
 import subprocess
@@ -26,12 +18,12 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame,
-    QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox,
-    QPlainTextEdit, QPushButton, QRadioButton, QStackedWidget, QVBoxLayout,
-    QWidget,
+    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
+    QPushButton, QRadioButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from config import get_torch_pruning_script, save_torch_pruning_script
+from screens.launcher import _parse_sh
 
 
 # ── Spec tables (declarative) ────────────────────────────────────────────
@@ -66,7 +58,6 @@ IMPORTANCE_MODES = ["variance", "weight_variance", "weight_variance_both",
 WV_BASE_MODES = ["variance", "weight_variance", "weight_variance_both"]
 PRUNING_SCHEDULES = ["geometric", "linear"]
 
-# (name, type, default)
 SPARSE_MODES: dict[str, list[tuple[str, str, Any]]] = {
     "l1_group":   [("epochs_sparse", "int",   5),
                    ("l1_lambda",     "float", 1e-4)],
@@ -84,7 +75,6 @@ SPARSE_MODES: dict[str, list[tuple[str, str, Any]]] = {
                    ("reg",           "float", 1e-4)],
 }
 
-# Always-on args shown in the "Advanced" panel on Step 1.
 ALWAYS_ON: list[tuple[str, str, Any]] = [
     ("data_path",        "str",   "/algo/NetOptimization/outputs/VBP/"),
     ("save_dir",         "str",   "./output/vbp_pat"),
@@ -97,31 +87,25 @@ ALWAYS_ON: list[tuple[str, str, Any]] = [
 ]
 
 FLAG_ORDER: list[str] = [
-    # Data + I/O
     "data_path", "save_dir", "keep_ratio", "max_batches", "disable_ddp",
     "train_batch_size", "val_batch_size", "num_workers",
-    # Arch
     "model_type", "cnn_arch", "model_name",
     "interior_only", "max_pruning_rate", "global_pruning", "isomorphic",
     "mac_target", "bn_recalibration", "bn_recalib_batches",
     "fold_bn_init", "fold_bn_before_prune", "checkpoint",
-    # Criterion
     "criterion", "importance_mode", "group_reduction",
     "no_compensation", "norm_per_layer", "similarity_discount",
     "normalize_importance", "alpha", "wv_base_mode", "mag_guided_delta",
-    # Regularization
     "sparse_mode", "epochs_sparse", "l1_lambda",
     "gmp_target_sparsity",
     "reparam_lambda", "reparam_refresh_interval", "reparam_normalize",
     "reparam_target", "reparam_entropy_lambda",
     "reg",
-    # FT / PAT schedule
     "pat_steps", "pat_epochs_per_step", "epochs_ft",
     "ft_warmup_epochs", "ft_eta_min",
     "lr", "ft_lr", "opt", "wd",
     "var_loss_weight", "reparam_during_pat",
     "pruning_schedule", "no_mask_only",
-    # KD
     "use_kd", "kd_alpha", "kd_T",
 ]
 
@@ -135,11 +119,39 @@ BOOL_FLAGS: set[str] = {
     "no_mask_only", "use_kd",
 }
 
+# Per-flag types for reverse-mapping when loading from .sh.
+TYPES: dict[str, str] = {
+    "epochs_ft": "int", "pat_steps": "int", "pat_epochs_per_step": "int",
+    "epochs_sparse": "int", "max_batches": "int", "train_batch_size": "int",
+    "val_batch_size": "int", "num_workers": "int",
+    "bn_recalib_batches": "int", "reparam_refresh_interval": "int",
+    "lr": "float", "ft_lr": "float", "wd": "float",
+    "kd_alpha": "float", "kd_T": "float",
+    "ft_warmup_epochs": "float", "ft_eta_min": "float",
+    "var_loss_weight": "float", "alpha": "float",
+    "mag_guided_delta": "float", "max_pruning_rate": "float",
+    "keep_ratio": "float",
+    "l1_lambda": "float", "gmp_target_sparsity": "float",
+    "reparam_lambda": "float", "reparam_entropy_lambda": "float",
+    "reg": "float",
+}
+
+
+# Wrapper for run_docker_gpu.sh dispatch (matches examples/run_ddp.py).
+DEFAULT_WRAPPER_A = (
+    "/algo/ws/shared/remote-gpu/run_docker_gpu.sh "
+    "-d gitlab-srv:4567/od-alg/od_next_gen:v1.7.7_tp2 "
+    "-C execute -q gpu_deep_train_low_q -W working_dir -M "
+)
+DEFAULT_WRAPPER_B = (
+    " -s 25gb -n 10 -o 60000 -A '' -p VISION "
+    "-v /algo/NetOptimization:/algo/NetOptimization "
+    "-R 'select[gpu_hm]' -R 'select[hname != gpusrv11]' "
+    "-E force_python_3=yes -x 4"
+)
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────
-
-
-PRESET_DIR = os.path.expanduser("~/.exphandler/presets")
 
 
 def _coerce(text: str, atype: str):
@@ -160,7 +172,6 @@ def _coerce(text: str, atype: str):
 
 
 def build_command(state: dict, script_path: str) -> list[str]:
-    """Assemble the python invocation as a list[str]."""
     cmd = ["python", script_path]
     for key in FLAG_ORDER:
         if key not in state:
@@ -176,16 +187,84 @@ def build_command(state: dict, script_path: str) -> list[str]:
     return cmd
 
 
-def _repo_root(script_path: str) -> str:
-    p = os.path.abspath(script_path)
-    cur = os.path.dirname(p)
-    seen: set = set()
-    while cur and cur != "/" and cur not in seen:
-        if os.path.isdir(os.path.join(cur, ".git")):
-            return cur
-        seen.add(cur)
-        cur = os.path.dirname(cur)
-    return os.path.dirname(os.path.dirname(os.path.dirname(p)))
+def state_from_parsed(parsed: dict) -> dict:
+    """Reverse-map a parsed run_ddp.sh dict to wizard state.
+
+    Resolves the radio-style choices (arch / criterion / pruning level /
+    reg yes-no) so each step's populate() can highlight the right option.
+    """
+    state: dict = {}
+
+    # Architecture
+    mt = parsed.get("model_type")
+    ca = parsed.get("cnn_arch")
+    arch = None
+    if mt == "cnn":
+        if ca == "mobilenet_v2":
+            arch = "MNv2"
+        elif ca == "resnet50":
+            arch = "RN50"
+    elif mt == "convnext":
+        arch = "ConvNeXt"
+    elif mt == "vit":
+        arch = "DeiT-T"
+    if arch:
+        cfg = ARCHS[arch]
+        state["_arch_choice"] = arch
+        state["model_type"] = cfg["model_type"]
+        state["cnn_arch"] = cfg["cnn_arch"]
+        state["model_name"] = parsed.get("model_name") or cfg["model_name"]
+
+    # Pruning level
+    iso = parsed.get("isomorphic")
+    glb = parsed.get("global_pruning")
+    if iso is True or str(iso).lower() in {"true", "1"}:
+        state["_pruning_level"] = "isomorphic"
+        state["isomorphic"] = True
+        state["global_pruning"] = False
+    elif glb is True or str(glb).lower() in {"true", "1"}:
+        state["_pruning_level"] = "global"
+        state["isomorphic"] = False
+        state["global_pruning"] = True
+    else:
+        state["_pruning_level"] = "local"
+        state["isomorphic"] = False
+        state["global_pruning"] = False
+
+    # Criterion
+    crit = parsed.get("criterion", "magnitude")
+    imp = parsed.get("importance_mode")
+    if crit == "magnitude":
+        state["_crit_choice"] = "magnitude"
+    elif crit == "variance" and imp == "tp_variance":
+        state["_crit_choice"] = "tp_var"
+    else:
+        state["_crit_choice"] = "VBP"
+
+    # Reg yes/no
+    sm = parsed.get("sparse_mode", "none")
+    state["_reg_yes"] = (sm != "none")
+
+    # Generic flag passthrough (skip the radios already resolved above).
+    skip_keys = {"isomorphic", "global_pruning", "model_type",
+                 "cnn_arch", "model_name", "criterion", "importance_mode"}
+    for k, v in parsed.items():
+        if k in skip_keys:
+            continue
+        if k in BOOL_FLAGS:
+            if v is True:
+                state[k] = True
+            else:
+                state[k] = str(v).lower() in {"true", "1", "yes"}
+        else:
+            atype = TYPES.get(k, "str")
+            raw = "" if v is True else str(v)
+            state[k] = _coerce(raw, atype)
+
+    # Allow arch/crit-resolved values to be re-applied if user paths have them
+    if "importance_mode" in parsed:
+        state["importance_mode"] = parsed["importance_mode"]
+    return state
 
 
 def _hsep() -> QFrame:
@@ -195,7 +274,7 @@ def _hsep() -> QFrame:
     return line
 
 
-# ── Step 1: Architecture ─────────────────────────────────────────────────
+# ── Step widgets (one per group box) ─────────────────────────────────────
 
 
 class _StepArch(QWidget):
@@ -207,7 +286,8 @@ class _StepArch(QWidget):
         self.on_change = on_change
 
         outer = QVBoxLayout(self)
-        outer.addWidget(QLabel("<b>Architecture</b>"))
+        outer.setContentsMargins(4, 4, 4, 4)
+        outer.setSpacing(4)
 
         self.arch_group = QButtonGroup(self)
         arch_row = QHBoxLayout()
@@ -221,9 +301,9 @@ class _StepArch(QWidget):
         arch_row.addStretch(1)
         outer.addLayout(arch_row)
 
-        # Pruning level radio (3-way: local / global / isomorphic)
-        outer.addWidget(QLabel("<b>Pruning level</b>"))
+        # Pruning level radio
         lvl_row = QHBoxLayout()
+        lvl_row.addWidget(QLabel("Pruning level:"))
         self.lvl_group = QButtonGroup(self)
         self.lvl_local = QRadioButton("local")
         self.lvl_global = QRadioButton("global")
@@ -235,18 +315,15 @@ class _StepArch(QWidget):
         lvl_row.addStretch(1)
         outer.addLayout(lvl_row)
 
-        # Arch-extra fields
         form = QFormLayout()
+        form.setSpacing(2)
         self.model_name_in = QLineEdit()
         self.model_name_in.setPlaceholderText("(model_name override)")
         form.addRow("--model_name:", self.model_name_in)
-
         self.interior_only_cb = QCheckBox("--interior_only")
         form.addRow(self.interior_only_cb)
-
         self.max_pr_in = QLineEdit("0.95")
         form.addRow("--max_pruning_rate:", self.max_pr_in)
-
         self.mac_target_cb = QCheckBox("--mac_target")
         form.addRow(self.mac_target_cb)
 
@@ -265,7 +342,7 @@ class _StepArch(QWidget):
         self.checkpoint_in = QLineEdit()
         self.checkpoint_in.setPlaceholderText("(optional .pth)")
         btn = QPushButton("…")
-        btn.setFixedWidth(28)
+        btn.setFixedWidth(24)
         btn.clicked.connect(self._pick_checkpoint)
         ckpt_row.addWidget(self.checkpoint_in)
         ckpt_row.addWidget(btn)
@@ -273,10 +350,9 @@ class _StepArch(QWidget):
         outer.addLayout(form)
 
         outer.addWidget(_hsep())
-
-        # Always-on / advanced
-        outer.addWidget(QLabel("<b>Always-on (advanced)</b>"))
+        outer.addWidget(QLabel("<b>Always-on</b>"))
         adv_form = QFormLayout()
+        adv_form.setSpacing(2)
         self.always_on_inputs: dict[str, QWidget] = {}
         for name, atype, default in ALWAYS_ON:
             if atype == "bool":
@@ -289,9 +365,7 @@ class _StepArch(QWidget):
                 adv_form.addRow(f"--{name}:", line)
                 self.always_on_inputs[name] = line
         outer.addLayout(adv_form)
-        outer.addStretch(1)
 
-        # Default selection
         self.arch_radios["RN50"].setChecked(True)
 
     def _pick_checkpoint(self):
@@ -341,7 +415,6 @@ class _StepArch(QWidget):
                     self.state["model_name"] = name_text or cfg["model_name"]
                 break
 
-        # Pruning level
         self.state["global_pruning"] = self.lvl_global.isChecked()
         self.state["isomorphic"] = self.lvl_iso.isChecked()
         self.state["_pruning_level"] = (
@@ -416,19 +489,6 @@ class _StepArch(QWidget):
 
         self._refresh_cnn_only()
 
-    def validate(self) -> list[str]:
-        errs: list[str] = []
-        kr = self.state.get("keep_ratio")
-        if kr is None or not (0 < kr <= 1):
-            errs.append("keep_ratio must be in (0, 1].")
-        ck = self.state.get("checkpoint")
-        if ck and not os.path.isfile(ck):
-            errs.append(f"checkpoint file not found: {ck} (warning only)")
-        return errs
-
-
-# ── Step 2: Criterion ────────────────────────────────────────────────────
-
 
 class _StepCriterion(QWidget):
     title = "2. Criterion"
@@ -439,7 +499,8 @@ class _StepCriterion(QWidget):
         self.on_change = on_change
 
         outer = QVBoxLayout(self)
-        outer.addWidget(QLabel("<b>Criterion</b>"))
+        outer.setContentsMargins(4, 4, 4, 4)
+        outer.setSpacing(4)
 
         self.crit_group = QButtonGroup(self)
         crit_row = QHBoxLayout()
@@ -453,7 +514,6 @@ class _StepCriterion(QWidget):
         crit_row.addStretch(1)
         outer.addLayout(crit_row)
 
-        # group_reduction (magnitude only)
         gr_row = QHBoxLayout()
         self.gr_label = QLabel("--group_reduction:")
         self.gr_combo = QComboBox()
@@ -463,9 +523,8 @@ class _StepCriterion(QWidget):
         gr_row.addStretch(1)
         outer.addLayout(gr_row)
 
-        outer.addWidget(_hsep())
-        outer.addWidget(QLabel("<b>Extras</b>"))
         self.extras_form = QFormLayout()
+        self.extras_form.setSpacing(2)
         self.extra_inputs: dict[str, QCheckBox] = {}
         all_extras = sorted(
             {e for c in CRITERIA.values() for e in c["extras"]}
@@ -476,14 +535,15 @@ class _StepCriterion(QWidget):
             self.extra_inputs[ex] = cb
         outer.addLayout(self.extras_form)
 
-        # Advanced (importance_mode override + ranking blend params)
         outer.addWidget(_hsep())
-        self.adv_toggle = QCheckBox("Show advanced (importance_mode / blends)")
+        self.adv_toggle = QCheckBox(
+            "Show advanced (importance_mode / blends)")
         self.adv_toggle.toggled.connect(self._refresh_adv)
         outer.addWidget(self.adv_toggle)
 
         self.adv_box = QGroupBox("Advanced")
         adv = QFormLayout(self.adv_box)
+        adv.setSpacing(2)
         self.imp_combo = QComboBox()
         self.imp_combo.addItem("(default for criterion)")
         self.imp_combo.addItems(IMPORTANCE_MODES)
@@ -498,7 +558,6 @@ class _StepCriterion(QWidget):
         self.norm_imp_cb = QCheckBox("--normalize_importance")
         adv.addRow(self.norm_imp_cb)
         outer.addWidget(self.adv_box)
-        outer.addStretch(1)
 
         self.crit_radios["VBP"].setChecked(True)
         self._refresh()
@@ -514,7 +573,6 @@ class _StepCriterion(QWidget):
         choice = self._current_choice()
         if not choice:
             return
-        # group_reduction visible only for magnitude
         is_mag = choice == "magnitude"
         self.gr_label.setVisible(is_mag)
         self.gr_combo.setVisible(is_mag)
@@ -533,20 +591,17 @@ class _StepCriterion(QWidget):
         self.state["_crit_choice"] = choice
         self.state["criterion"] = cfg["criterion"]
 
-        # Advanced: importance_mode override (if not "(default…)")
         adv_mode = self.imp_combo.currentText()
         if self.adv_toggle.isChecked() and adv_mode in IMPORTANCE_MODES:
             self.state["importance_mode"] = adv_mode
         else:
             self.state["importance_mode"] = cfg["importance_mode"]
 
-        # group_reduction only for magnitude
         if choice == "magnitude":
             self.state["group_reduction"] = self.gr_combo.currentText()
         else:
             self.state.pop("group_reduction", None)
 
-        # Extras
         for ex in self.extra_inputs:
             if ex in cfg["extras"]:
                 cb = self.extra_inputs[ex]
@@ -554,7 +609,6 @@ class _StepCriterion(QWidget):
             else:
                 self.state[ex] = False
 
-        # Advanced numerics
         if self.adv_toggle.isChecked():
             self.state["alpha"] = _coerce(self.alpha_in.text(), "float")
             self.state["wv_base_mode"] = self.wv_base_combo.currentText()
@@ -576,9 +630,9 @@ class _StepCriterion(QWidget):
                 self.gr_combo.setCurrentIndex(idx)
         for ex, cb in self.extra_inputs.items():
             cb.setChecked(bool(self.state.get(ex, False)))
-        if any(k in self.state for k in
-               ("alpha", "wv_base_mode", "mag_guided_delta",
-                "normalize_importance")):
+        adv_keys = ("alpha", "wv_base_mode", "mag_guided_delta",
+                    "normalize_importance")
+        if any(k in self.state for k in adv_keys):
             self.adv_toggle.setChecked(True)
             if self.state.get("importance_mode") in IMPORTANCE_MODES:
                 idx = self.imp_combo.findText(self.state["importance_mode"])
@@ -597,12 +651,6 @@ class _StepCriterion(QWidget):
         self._refresh()
         self._refresh_adv(self.adv_toggle.isChecked())
 
-    def validate(self) -> list[str]:
-        return []
-
-
-# ── Step 3: Regularization ───────────────────────────────────────────────
-
 
 class _StepReg(QWidget):
     title = "3. Regularization"
@@ -613,8 +661,11 @@ class _StepReg(QWidget):
         self.on_change = on_change
 
         outer = QVBoxLayout(self)
-        outer.addWidget(QLabel("<b>Use sparse pre-training?</b>"))
+        outer.setContentsMargins(4, 4, 4, 4)
+        outer.setSpacing(4)
+
         row = QHBoxLayout()
+        row.addWidget(QLabel("Sparse pre-training:"))
         self.no_rb = QRadioButton("No")
         self.yes_rb = QRadioButton("Yes")
         self.no_rb.setChecked(True)
@@ -627,6 +678,7 @@ class _StepReg(QWidget):
 
         self.mode_box = QGroupBox("Sparse mode")
         mode_layout = QVBoxLayout(self.mode_box)
+        mode_layout.setContentsMargins(6, 6, 6, 6)
         sel_row = QHBoxLayout()
         sel_row.addWidget(QLabel("--sparse_mode:"))
         self.mode_combo = QComboBox()
@@ -637,11 +689,11 @@ class _StepReg(QWidget):
         mode_layout.addLayout(sel_row)
 
         self.block_form = QFormLayout()
+        self.block_form.setSpacing(2)
         self.block_widget = QWidget()
         self.block_widget.setLayout(self.block_form)
         mode_layout.addWidget(self.block_widget)
         outer.addWidget(self.mode_box)
-        outer.addStretch(1)
 
         self._block_inputs: dict[str, QWidget] = {}
         self._refresh()
@@ -706,12 +758,6 @@ class _StepReg(QWidget):
             self.no_rb.setChecked(True)
         self._refresh()
 
-    def validate(self) -> list[str]:
-        return []
-
-
-# ── Step 4: Fine-tuning / PAT / KD ───────────────────────────────────────
-
 
 class _StepFT(QWidget):
     title = "4. Fine-tuning"
@@ -722,9 +768,11 @@ class _StepFT(QWidget):
         self.on_change = on_change
 
         outer = QVBoxLayout(self)
-        outer.addWidget(QLabel("<b>Optimizer / FT loop</b>"))
+        outer.setContentsMargins(4, 4, 4, 4)
+        outer.setSpacing(4)
 
         form = QFormLayout()
+        form.setSpacing(2)
         self.lr_in = QLineEdit("1.5e-5")
         form.addRow("--lr:", self.lr_in)
         self.ft_lr_in = QLineEdit()
@@ -735,26 +783,23 @@ class _StepFT(QWidget):
         form.addRow("--opt:", self.opt_combo)
         self.wd_in = QLineEdit("0.01")
         form.addRow("--wd:", self.wd_in)
-
         self.epochs_ft = QLineEdit("10")
         form.addRow("--epochs_ft:", self.epochs_ft)
         self.ft_warmup_in = QLineEdit("0")
         form.addRow("--ft_warmup_epochs:", self.ft_warmup_in)
         self.ft_eta_min_in = QLineEdit("1e-8")
         form.addRow("--ft_eta_min:", self.ft_eta_min_in)
-
         self.sched_combo = QComboBox()
         self.sched_combo.addItems(PRUNING_SCHEDULES)
         form.addRow("--pruning_schedule:", self.sched_combo)
         self.no_mask_only_cb = QCheckBox("--no_mask_only")
         form.addRow(self.no_mask_only_cb)
-
         outer.addLayout(form)
-        outer.addWidget(_hsep())
 
-        # PAT block
-        outer.addWidget(QLabel("<b>PAT schedule</b>"))
+        outer.addWidget(_hsep())
+        outer.addWidget(QLabel("<b>PAT</b>"))
         pat_form = QFormLayout()
+        pat_form.setSpacing(2)
         self.pat_steps = QLineEdit("1")
         pat_form.addRow("--pat_steps:", self.pat_steps)
         self.pat_eps = QLineEdit("0")
@@ -764,20 +809,19 @@ class _StepFT(QWidget):
         self.reparam_during_pat_cb = QCheckBox("--reparam_during_pat")
         pat_form.addRow(self.reparam_during_pat_cb)
         outer.addLayout(pat_form)
-        outer.addWidget(_hsep())
 
-        # KD block
+        outer.addWidget(_hsep())
         self.kd_cb = QCheckBox("Use KD?")
         self.kd_cb.toggled.connect(self._refresh_kd)
         outer.addWidget(self.kd_cb)
         self.kd_box = QGroupBox("KD params")
         kd_form = QFormLayout(self.kd_box)
+        kd_form.setSpacing(2)
         self.kd_alpha = QLineEdit("0.7")
         kd_form.addRow("--kd_alpha:", self.kd_alpha)
         self.kd_T = QLineEdit("2.0")
         kd_form.addRow("--kd_T:", self.kd_T)
         outer.addWidget(self.kd_box)
-        outer.addStretch(1)
 
         self._refresh_kd(False)
 
@@ -821,6 +865,8 @@ class _StepFT(QWidget):
             self.lr_in.setText(str(self.state["lr"]))
         if self.state.get("ft_lr") is not None:
             self.ft_lr_in.setText(str(self.state["ft_lr"]))
+        else:
+            self.ft_lr_in.setText("")
         opt = self.state.get("opt", "adamw")
         idx = self.opt_combo.findText(opt)
         if idx >= 0:
@@ -854,69 +900,6 @@ class _StepFT(QWidget):
         if self.state.get("kd_T") is not None:
             self.kd_T.setText(str(self.state["kd_T"]))
 
-    def validate(self) -> list[str]:
-        errs: list[str] = []
-        ps = _coerce(self.pat_steps.text(), "int")
-        pe = _coerce(self.pat_eps.text(), "int")
-        if ps is None or ps < 1:
-            errs.append("pat_steps must be ≥ 1.")
-        if pe is None or pe < 0:
-            errs.append("pat_epochs_per_step must be ≥ 0.")
-        return errs
-
-
-# ── Final review page ───────────────────────────────────────────────────
-
-
-class _StepFinal(QWidget):
-    title = "Review & Run"
-
-    def __init__(self, state: dict, get_script):
-        super().__init__()
-        self.state = state
-        self.get_script = get_script
-
-        outer = QVBoxLayout(self)
-        outer.addWidget(QLabel("<b>Final command</b>"))
-        self.cmd_view = QPlainTextEdit()
-        self.cmd_view.setReadOnly(True)
-        self.cmd_view.setFont(QFont("Menlo", 10))
-        self.cmd_view.setMaximumHeight(140)
-        outer.addWidget(self.cmd_view)
-
-        btn_row = QHBoxLayout()
-        self.btn_copy = QPushButton("Copy")
-        self.btn_copy.clicked.connect(self._on_copy)
-        btn_row.addWidget(self.btn_copy)
-        self.btn_run = QPushButton("Run (blocking)")
-        btn_row.addWidget(self.btn_run)
-        self.btn_save = QPushButton("Save preset")
-        btn_row.addWidget(self.btn_save)
-        self.btn_load = QPushButton("Load preset")
-        btn_row.addWidget(self.btn_load)
-        btn_row.addStretch(1)
-        outer.addLayout(btn_row)
-
-        outer.addWidget(QLabel("<b>Run log</b>"))
-        self.log = QPlainTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setFont(QFont("Menlo", 10))
-        outer.addWidget(self.log, stretch=1)
-
-    def _on_copy(self):
-        from PyQt5.QtWidgets import QApplication
-        QApplication.clipboard().setText(self.cmd_view.toPlainText())
-
-    def populate(self) -> None:
-        cmd = build_command(self.state, self.get_script())
-        self.cmd_view.setPlainText(" ".join(shlex.quote(p) for p in cmd))
-
-    def apply(self) -> None:
-        return
-
-    def validate(self) -> list[str]:
-        return []
-
 
 # ── Main wizard widget ───────────────────────────────────────────────────
 
@@ -928,7 +911,9 @@ class VBPWizardScreen(QWidget):
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(6)
 
+        # Script path
         path_row = QHBoxLayout()
         path_row.addWidget(QLabel("Script:"))
         self.script_in = QLineEdit(get_torch_pruning_script())
@@ -936,85 +921,94 @@ class VBPWizardScreen(QWidget):
             lambda: save_torch_pruning_script(self.script_in.text().strip()))
         path_row.addWidget(self.script_in, stretch=1)
         btn = QPushButton("…")
-        btn.setFixedWidth(28)
+        btn.setFixedWidth(24)
         btn.clicked.connect(self._pick_script)
         path_row.addWidget(btn)
         outer.addLayout(path_row)
 
-        self.crumb = QLabel()
-        outer.addWidget(self.crumb)
+        # Scrollable form: 4 group boxes
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(2, 2, 2, 2)
+        body_layout.setSpacing(4)
 
-        self.stack = QStackedWidget()
-        self.steps: list[QWidget] = [
-            _StepArch(self.state, self._on_state_change),
-            _StepCriterion(self.state, self._on_state_change),
-            _StepReg(self.state, self._on_state_change),
-            _StepFT(self.state, self._on_state_change),
-            _StepFinal(self.state, lambda: self.script_in.text().strip()),
-        ]
-        for w in self.steps:
-            self.stack.addWidget(w)
-        outer.addWidget(self.stack, stretch=1)
+        self.step_arch = _StepArch(self.state, self._refresh_preview)
+        self.step_crit = _StepCriterion(self.state, self._refresh_preview)
+        self.step_reg = _StepReg(self.state, self._refresh_preview)
+        self.step_ft = _StepFT(self.state, self._refresh_preview)
 
-        nav = QHBoxLayout()
-        self.btn_back = QPushButton("Back")
-        self.btn_back.clicked.connect(self._go_back)
-        nav.addWidget(self.btn_back)
-        self.btn_next = QPushButton("Next")
-        self.btn_next.clicked.connect(self._go_next)
-        nav.addWidget(self.btn_next)
-        nav.addStretch(1)
-        outer.addLayout(nav)
+        for w in (self.step_arch, self.step_crit, self.step_reg, self.step_ft):
+            box = QGroupBox(w.title)
+            l = QVBoxLayout(box)
+            l.setContentsMargins(6, 6, 6, 6)
+            l.setSpacing(2)
+            l.addWidget(w)
+            body_layout.addWidget(box)
+        body_layout.addStretch(1)
+        scroll.setWidget(body)
+        outer.addWidget(scroll, stretch=2)
 
-        final: _StepFinal = self.steps[-1]
-        final.btn_run.clicked.connect(self._run_now)
-        final.btn_save.clicked.connect(self._save_preset)
-        final.btn_load.clicked.connect(self._load_preset)
+        # Command preview
+        outer.addWidget(QLabel("<b>Command preview</b>"))
+        self.cmd_view = QPlainTextEdit()
+        self.cmd_view.setReadOnly(True)
+        self.cmd_view.setFont(QFont("Menlo", 10))
+        self.cmd_view.setMaximumHeight(120)
+        outer.addWidget(self.cmd_view)
 
-        self.stack.setCurrentIndex(0)
-        self._update_nav()
+        # Buttons
+        btn_row = QHBoxLayout()
+        self.btn_refresh = QPushButton("Refresh preview")
+        self.btn_refresh.clicked.connect(self._refresh_preview)
+        btn_row.addWidget(self.btn_refresh)
+        self.btn_copy = QPushButton("Copy")
+        self.btn_copy.clicked.connect(self._on_copy)
+        btn_row.addWidget(self.btn_copy)
+        self.btn_run = QPushButton("Run (blocking, via run_docker_gpu.sh)")
+        self.btn_run.clicked.connect(self._run_now)
+        btn_row.addWidget(self.btn_run)
+        self.btn_save = QPushButton("Save .sh")
+        self.btn_save.clicked.connect(self._save_sh)
+        btn_row.addWidget(self.btn_save)
+        self.btn_load = QPushButton("Load .sh")
+        self.btn_load.clicked.connect(self._load_sh)
+        btn_row.addWidget(self.btn_load)
+        btn_row.addStretch(1)
+        outer.addLayout(btn_row)
 
-    def _update_nav(self):
-        idx = self.stack.currentIndex()
-        last = self.stack.count() - 1
-        self.btn_back.setEnabled(idx > 0)
-        self.btn_next.setEnabled(idx < last)
-        if idx >= last:
-            self.btn_next.setText("Done")
-        else:
-            self.btn_next.setText("Next")
-        crumbs = " → ".join(
-            f"<b>{w.title}</b>" if i == idx else w.title
-            for i, w in enumerate(self.steps)
-        )
-        self.crumb.setText(crumbs)
+        # Log
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setFont(QFont("Menlo", 10))
+        self.log.setMaximumHeight(180)
+        outer.addWidget(self.log)
 
-    def _go_next(self):
-        idx = self.stack.currentIndex()
-        cur: Any = self.steps[idx]
-        cur.apply()
-        errs = cur.validate()
-        if errs:
-            QMessageBox.warning(self, "Validation", "\n".join(errs))
-        if idx < self.stack.count() - 1:
-            nxt: Any = self.steps[idx + 1]
-            nxt.populate()
-            self.stack.setCurrentIndex(idx + 1)
-            self._update_nav()
+        self._refresh_preview()
 
-    def _go_back(self):
-        idx = self.stack.currentIndex()
-        if idx == 0:
-            return
-        cur: Any = self.steps[idx]
-        cur.apply()
-        prev: Any = self.steps[idx - 1]
-        prev.populate()
-        self.stack.setCurrentIndex(idx - 1)
-        self._update_nav()
+    # ── Actions ───────────────────────────────────────────────────────
+    def _all_steps(self) -> list[QWidget]:
+        return [self.step_arch, self.step_crit, self.step_reg, self.step_ft]
 
-    def _on_state_change(self):
-        pass
+    def _apply_all(self) -> None:
+        for s in self._all_steps():
+            if hasattr(s, "apply"):
+                s.apply()
+
+    def _populate_all(self) -> None:
+        for s in self._all_steps():
+            if hasattr(s, "populate"):
+                s.populate()
+
+    def _refresh_preview(self):
+        self._apply_all()
+        cmd = build_command(self.state, self.script_in.text().strip())
+        self.cmd_view.setPlainText(" ".join(shlex.quote(p) for p in cmd))
+
+    def _on_copy(self):
+        from PyQt5.QtWidgets import QApplication
+        QApplication.clipboard().setText(self.cmd_view.toPlainText())
 
     def _pick_script(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1026,83 +1020,109 @@ class VBPWizardScreen(QWidget):
             self.script_in.setText(path)
             save_torch_pruning_script(path)
 
-    def _run_now(self):
-        final: _StepFinal = self.steps[-1]
+    def _build_sh_text(self) -> str:
         cmd = build_command(self.state, self.script_in.text().strip())
+        return ("#!/usr/bin/env bash\n"
+                + " ".join(shlex.quote(p) for p in cmd) + "\n")
+
+    def _run_now(self):
+        self._refresh_preview()
+        save_dir = self.state.get("save_dir") or "."
+        arch = self.state.get("_arch_choice", "arch")
+        crit = self.state.get("_crit_choice", "crit")
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        try:
+            os.makedirs(save_dir, exist_ok=True)
+            try:
+                os.chmod(save_dir, 0o777)
+            except OSError:
+                pass
+        except OSError as e:
+            self.log.appendPlainText(f"[mkdir failed: {e}]")
+            return
+        sh_path = os.path.join(save_dir, f"wizard_{arch}_{crit}_{ts}.sh")
+        try:
+            with open(sh_path, "w") as f:
+                f.write(self._build_sh_text())
+            try:
+                os.chmod(sh_path, 0o777)
+            except OSError:
+                pass
+        except OSError as e:
+            self.log.appendPlainText(f"[write failed: {e}]")
+            return
+
+        desc = f"VBP Wizard {arch} {crit} {ts}"
+        full_cmd = (DEFAULT_WRAPPER_A + sh_path + DEFAULT_WRAPPER_B
+                    + f" -D '{desc}'")
         confirm = QMessageBox.question(
-            self, "Run?",
-            "Running blocks the UI until the process exits.\n\n"
-            f"$ {' '.join(shlex.quote(p) for p in cmd)}\n\nProceed?",
+            self, "Submit?",
+            f"$ {full_cmd}\n\nProceed?",
             QMessageBox.Yes | QMessageBox.No,
         )
         if confirm != QMessageBox.Yes:
             return
-        repo = _repo_root(self.script_in.text().strip())
-        log_dir = os.path.join(repo, "logs")
-        os.makedirs(log_dir, exist_ok=True)
-        ts = time.strftime("%Y%m%d-%H%M%S")
-        arch = self.state.get("_arch_choice", "arch")
-        crit = self.state.get("_crit_choice", "crit")
-        log_path = os.path.join(log_dir, f"{arch}_{crit}_{ts}.log")
-
-        final.log.appendPlainText(
-            f"$ {' '.join(shlex.quote(p) for p in cmd)}")
-        final.log.appendPlainText(f"[log: {log_path}]")
-        final.log.repaint()
+        self.log.appendPlainText(f"$ {full_cmd}")
+        self.log.repaint()
         try:
-            with open(log_path, "w") as f:
-                f.write("$ " + " ".join(shlex.quote(p) for p in cmd) + "\n")
-                proc = subprocess.run(cmd, cwd=repo, stdout=f,
-                                      stderr=subprocess.STDOUT)
-            final.log.appendPlainText(f"-> rc={proc.returncode}")
-        except FileNotFoundError as e:
-            final.log.appendPlainText(f"[error: {e}]")
+            res = subprocess.run(full_cmd, shell=True, capture_output=True,
+                                 text=True, timeout=300)
+            if res.stdout:
+                self.log.appendPlainText(res.stdout.rstrip())
+            if res.stderr:
+                self.log.appendPlainText("STDERR: " + res.stderr.rstrip())
+            self.log.appendPlainText(f"-> rc={res.returncode}")
+        except subprocess.TimeoutExpired:
+            self.log.appendPlainText("[timeout: 300s]")
         except Exception as e:
-            final.log.appendPlainText(f"[error: {e}]")
+            self.log.appendPlainText(f"[error: {e}]")
 
-    def _save_preset(self):
-        name, ok = QInputDialog.getText(self, "Save preset", "Name:")
-        if not ok or not name.strip():
-            return
-        idx = self.stack.currentIndex()
-        cur: Any = self.steps[idx]
-        cur.apply()
-        os.makedirs(PRESET_DIR, exist_ok=True)
-        path = os.path.join(PRESET_DIR, f"{name.strip()}.json")
-        if os.path.exists(path):
-            confirm = QMessageBox.question(
-                self, "Overwrite?", f"{path} exists. Overwrite?",
-                QMessageBox.Yes | QMessageBox.No,
-            )
-            if confirm != QMessageBox.Yes:
-                return
-        with open(path, "w") as f:
-            json.dump(self.state, f, indent=2)
-        QMessageBox.information(self, "Saved", f"Preset saved: {path}")
-
-    def _load_preset(self):
-        os.makedirs(PRESET_DIR, exist_ok=True)
-        files = sorted(f for f in os.listdir(PRESET_DIR) if f.endswith(".json"))
-        if not files:
-            QMessageBox.information(
-                self, "No presets", f"No presets in {PRESET_DIR}")
-            return
-        choice, ok = QInputDialog.getItem(
-            self, "Load preset", "Pick:", files, 0, False,
+    def _save_sh(self):
+        self._refresh_preview()
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save .sh", "wizard_run.sh", "Shell scripts (*.sh)"
         )
-        if not ok:
+        if not path:
             return
-        path = os.path.join(PRESET_DIR, choice)
+        try:
+            with open(path, "w") as f:
+                f.write(self._build_sh_text())
+            try:
+                os.chmod(path, 0o755)
+            except OSError:
+                pass
+        except OSError as e:
+            QMessageBox.warning(self, "Save failed", str(e))
+            return
+        self.log.appendPlainText(f"[saved {path}]")
+
+    def _load_sh(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load .sh", "", "Shell scripts (*.sh);;All (*)"
+        )
+        if not path:
+            return
         try:
             with open(path) as f:
-                loaded = json.load(f)
-        except Exception as e:
-            QMessageBox.warning(self, "Load failed", str(e))
+                text = f.read()
+        except OSError as e:
+            QMessageBox.warning(self, "Read failed", str(e))
             return
+        parsed = _parse_sh(text)
+        new_state = state_from_parsed(parsed)
+        # Drop schema-derived flags (script path, etc.) we don't track in state
+        unknown = sorted(k for k in parsed
+                         if k not in FLAG_ORDER
+                         and k not in {"isomorphic", "global_pruning"})
         self.state.clear()
-        self.state.update(loaded)
-        for w in self.steps:
-            if hasattr(w, "populate"):
-                w.populate()
-        final: _StepFinal = self.steps[-1]
-        final.populate()
+        self.state.update(new_state)
+        self._populate_all()
+        self._refresh_preview()
+        unk_msg = f", ignored: {unknown}" if unknown else ""
+        self.log.appendPlainText(
+            f"[loaded {os.path.basename(path)}: arch="
+            f"{self.state.get('_arch_choice')}, "
+            f"crit={self.state.get('_crit_choice')}, "
+            f"level={self.state.get('_pruning_level')}, "
+            f"reg={'yes' if self.state.get('_reg_yes') else 'no'}{unk_msg}]"
+        )
