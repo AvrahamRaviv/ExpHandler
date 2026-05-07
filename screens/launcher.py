@@ -309,9 +309,38 @@ class LauncherScreen(QWidget):
         kr_arg = self._schema.get("kr_arg", "keep_ratio")
         save_dir_arg = self._schema.get("save_dir_arg", "save_dir")
 
+        # Flags already emitted as part of ddp_prefix (e.g. --nproc_per_node)
+        # must not be auto-added to schema, otherwise launch would emit twice.
+        prefix_flags: set = set()
+        try:
+            prefix_tokens = shlex.split(self._schema.get("ddp_prefix", ""))
+        except ValueError:
+            prefix_tokens = self._schema.get("ddp_prefix", "").split()
+        for t in prefix_tokens:
+            if t.startswith("--") and len(t) > 2:
+                body = t[2:]
+                prefix_flags.add(body.split("=", 1)[0] if "=" in body else body)
+
+        skip = {kr_arg, save_dir_arg} | prefix_flags
+
+        # Auto-extend schema with unknown flags from the .sh
+        schema_names = {a["name"] for a in self._schema.get("args", [])}
+        added: list[str] = []
+        for k, v in parsed.items():
+            if k in skip or k in schema_names:
+                continue
+            self._schema["args"].append({
+                "name": k,
+                "type": "bool" if v is True else "str",
+                "default": True if v is True else str(v),
+            })
+            added.append(k)
+        if added:
+            save_schema(self._subtype, self._schema)
+            self._populate_table_from_defaults()
+
         # Apply parsed values to table (skip derived args)
         schema_args = self._schema.get("args", [])
-        skip = {kr_arg, save_dir_arg}
         matched: list[str] = []
         for i, arg in enumerate(schema_args):
             name = arg["name"]
@@ -340,12 +369,10 @@ class LauncherScreen(QWidget):
             except (TypeError, ValueError):
                 pass
 
-        schema_names = {a["name"] for a in schema_args}
-        unknown = sorted(k for k in parsed if k not in schema_names and k not in skip)
-        unk_msg = f", ignored: {unknown}" if unknown else ""
+        added_msg = f", added: {added}" if added else ""
         self._append_log(
             f"[loaded {os.path.basename(path)}: {len(matched)} args overridden"
-            f"{e_s_msg}{unk_msg}]"
+            f"{added_msg}{e_s_msg}]"
         )
 
     def _on_edit_defaults(self):
