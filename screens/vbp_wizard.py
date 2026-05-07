@@ -1,16 +1,16 @@
 """VBP Run Wizard.
 
-4-step state machine that builds a python invocation of vbp_imagenet_pat.py:
+4-step state machine that builds a python invocation of vbp_imagenet_pat.py.
+Flag names mirror that script's argparse (paste 2026-05-07).
 
-    1. Architecture        (model_type, cnn_arch, model_name, ...)
-    2. Criterion           (criterion + importance_mode)
-    3. Regularization      (sparse_mode + its block)
+    1. Architecture        (model_type / cnn_arch / model_name + arch extras)
+    2. Criterion           (criterion + importance_mode + extras)
+    3. Regularization      (sparse_mode block)
     4. Fine-tuning / PAT / KD
 
 Final page shows the assembled command, with Copy / Run / Save preset / Load.
-
-Run mode is blocking subprocess.run (UI freezes during training), per spec.
-Output mirrored to <repo>/logs/<arch>_<criterion>_<timestamp>.log.
+Run mode is blocking subprocess.run; output mirrored to
+<repo>/logs/<arch>_<criterion>_<timestamp>.log.
 """
 
 from __future__ import annotations
@@ -25,10 +25,10 @@ from typing import Any
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
-    QFormLayout, QFrame, QGroupBox, QHBoxLayout, QInputDialog, QLabel,
-    QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton,
-    QStackedWidget, QVBoxLayout, QWidget,
+    QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame,
+    QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox,
+    QPlainTextEdit, QPushButton, QRadioButton, QStackedWidget, QVBoxLayout,
+    QWidget,
 )
 
 from config import get_torch_pruning_script, save_torch_pruning_script
@@ -44,84 +44,95 @@ ARCHS: dict[str, dict] = {
     "ConvNeXt": {"model_type": "convnext", "cnn_arch": None,
                  "model_name": "convnext_tiny", "interior_default": True},
     "DeiT-T":   {"model_type": "vit",      "cnn_arch": None,
-                 "model_name": "/path/to/DeiT_tiny", "interior_default": True},
+                 "model_name": "/algo/NetOptimization/outputs/VBP/DeiT_tiny",
+                 "interior_default": True},
 }
 
 CRITERIA: dict[str, dict] = {
     "magnitude": {"criterion": "magnitude", "importance_mode": None,
                   "extras": []},
     "VBP":       {"criterion": "variance",  "importance_mode": "variance",
-                  "extras": ["no_compensation", "norm_per_layer"]},
+                  "extras": ["no_compensation", "norm_per_layer",
+                             "similarity_discount"]},
     "tp_var":    {"criterion": "variance",  "importance_mode": "tp_variance",
-                  "extras": ["no_compensation", "norm_per_layer", "no_recalib"]},
+                  "extras": ["no_compensation", "norm_per_layer",
+                             "similarity_discount"]},
 }
+
+GROUP_REDUCTIONS = ["mean", "sum", "prod", "max", "first", "dw_proj", "ww"]
+IMPORTANCE_MODES = ["variance", "weight_variance", "weight_variance_both",
+                    "combined", "rank_fusion", "mag_guided", "tp_variance",
+                    "dw_proj_var"]
+WV_BASE_MODES = ["variance", "weight_variance", "weight_variance_both"]
+PRUNING_SCHEDULES = ["geometric", "linear"]
 
 # (name, type, default)
 SPARSE_MODES: dict[str, list[tuple[str, str, Any]]] = {
-    "l1_group":  [("epochs_sparse", "int",   5),
-                  ("lr_sparse",     "float", 1e-4),
-                  ("l1_lambda",     "float", 1e-4)],
-    "gmp":       [("epochs_sparse", "int",   5),
-                  ("lr_sparse",     "float", 1e-4),
-                  ("gmp_target_sparsity", "float", 0.5)],
-    "reparam":   [("epochs_sparse", "int",   5),
-                  ("lr_sparse",     "float", 1e-4),
-                  ("reparam_lambda", "float", 0.01),
-                  ("reparam_refresh_interval", "int", 1),
-                  ("reparam_normalize", "bool", False),
-                  ("reparam_target",   "str", "fc1")],
+    "l1_group":   [("epochs_sparse", "int",   5),
+                   ("l1_lambda",     "float", 1e-4)],
+    "gmp":        [("epochs_sparse", "int",   5),
+                   ("gmp_target_sparsity", "float", 0.5)],
+    "reparam":    [("epochs_sparse", "int",   5),
+                   ("reparam_lambda",     "float", 0.01),
+                   ("reparam_refresh_interval", "int", 1),
+                   ("reparam_normalize",  "bool",  False),
+                   ("reparam_target",     "str",   "fc2")],
+    "vnr":        [("epochs_sparse",          "int",   5),
+                   ("reparam_lambda",         "float", 0.01),
+                   ("reparam_entropy_lambda", "float", 0.0)],
     "group_norm": [("epochs_sparse", "int",   5),
-                   ("lr_sparse",     "float", 1e-4),
                    ("reg",           "float", 1e-4)],
 }
 
 # Always-on args shown in the "Advanced" panel on Step 1.
-# (name, type, default)
 ALWAYS_ON: list[tuple[str, str, Any]] = [
     ("data_path",        "str",   "/algo/NetOptimization/outputs/VBP/"),
-    ("save_dir",         "str",   ""),
-    ("keep_ratio",       "float", 0.95),
-    ("max_batches",      "int",   None),
+    ("save_dir",         "str",   "./output/vbp_pat"),
+    ("keep_ratio",       "float", 0.65),
+    ("max_batches",      "int",   200),
     ("disable_ddp",      "bool",  False),
-    ("train_batch_size", "int",   128),
+    ("train_batch_size", "int",   64),
     ("val_batch_size",   "int",   128),
-    ("num_workers",      "int",   8),
+    ("num_workers",      "int",   4),
 ]
 
-# Order in which build_command emits flags (later groups override earlier
-# ones if duplicated, but state holds one value per key so duplicates can't
-# happen).
 FLAG_ORDER: list[str] = [
-    # always-on
+    # Data + I/O
     "data_path", "save_dir", "keep_ratio", "max_batches", "disable_ddp",
     "train_batch_size", "val_batch_size", "num_workers",
-    # arch
+    # Arch
     "model_type", "cnn_arch", "model_name",
-    "interior_only", "max_pruning_ratio", "global_pruning", "isomorphic",
-    "checkpoint",
-    # criterion
-    "criterion", "importance_mode",
-    "no_compensation", "norm_per_layer", "no_recalib",
-    # reg
-    "sparse_mode",
-    "epochs_sparse", "lr_sparse", "l1_lambda",
+    "interior_only", "max_pruning_rate", "global_pruning", "isomorphic",
+    "mac_target", "bn_recalibration", "bn_recalib_batches",
+    "fold_bn_init", "fold_bn_before_prune", "checkpoint",
+    # Criterion
+    "criterion", "importance_mode", "group_reduction",
+    "no_compensation", "norm_per_layer", "similarity_discount",
+    "normalize_importance", "alpha", "wv_base_mode", "mag_guided_delta",
+    # Regularization
+    "sparse_mode", "epochs_sparse", "l1_lambda",
     "gmp_target_sparsity",
     "reparam_lambda", "reparam_refresh_interval", "reparam_normalize",
-    "reparam_target",
+    "reparam_target", "reparam_entropy_lambda",
     "reg",
-    # FT
-    "epochs_ft", "lr_ft", "opt_ft", "momentum_ft", "wd_ft",
-    # PAT
-    "pat", "pat_steps", "pat_epochs_per_step", "var_loss_weight",
-    "reparam_during_pat",
+    # FT / PAT schedule
+    "pat_steps", "pat_epochs_per_step", "epochs_ft",
+    "ft_warmup_epochs", "ft_eta_min",
+    "lr", "ft_lr", "opt", "wd",
+    "var_loss_weight", "reparam_during_pat",
+    "pruning_schedule", "no_mask_only",
     # KD
     "use_kd", "kd_alpha", "kd_T",
 ]
 
 BOOL_FLAGS: set[str] = {
-    "disable_ddp", "interior_only", "global_pruning", "isomorphic",
-    "no_compensation", "norm_per_layer", "no_recalib",
-    "reparam_normalize", "pat", "reparam_during_pat", "use_kd",
+    "disable_ddp",
+    "interior_only", "global_pruning", "isomorphic",
+    "mac_target", "bn_recalibration", "fold_bn_init", "fold_bn_before_prune",
+    "no_compensation", "norm_per_layer", "similarity_discount",
+    "normalize_importance",
+    "reparam_normalize", "reparam_during_pat",
+    "no_mask_only", "use_kd",
 }
 
 
@@ -166,10 +177,9 @@ def build_command(state: dict, script_path: str) -> list[str]:
 
 
 def _repo_root(script_path: str) -> str:
-    """Walk up looking for .git; fallback to 3 levels above the script."""
     p = os.path.abspath(script_path)
     cur = os.path.dirname(p)
-    seen = set()
+    seen: set = set()
     while cur and cur != "/" and cur not in seen:
         if os.path.isdir(os.path.join(cur, ".git")):
             return cur
@@ -178,14 +188,14 @@ def _repo_root(script_path: str) -> str:
     return os.path.dirname(os.path.dirname(os.path.dirname(p)))
 
 
-# ── Step pages ───────────────────────────────────────────────────────────
-
-
 def _hsep() -> QFrame:
     line = QFrame()
     line.setFrameShape(QFrame.HLine)
     line.setFrameShadow(QFrame.Sunken)
     return line
+
+
+# ── Step 1: Architecture ─────────────────────────────────────────────────
 
 
 class _StepArch(QWidget):
@@ -211,22 +221,45 @@ class _StepArch(QWidget):
         arch_row.addStretch(1)
         outer.addLayout(arch_row)
 
+        # Pruning level radio (3-way: local / global / isomorphic)
+        outer.addWidget(QLabel("<b>Pruning level</b>"))
+        lvl_row = QHBoxLayout()
+        self.lvl_group = QButtonGroup(self)
+        self.lvl_local = QRadioButton("local")
+        self.lvl_global = QRadioButton("global")
+        self.lvl_iso = QRadioButton("isomorphic")
+        for rb in (self.lvl_local, self.lvl_global, self.lvl_iso):
+            self.lvl_group.addButton(rb)
+            lvl_row.addWidget(rb)
+        self.lvl_local.setChecked(True)
+        lvl_row.addStretch(1)
+        outer.addLayout(lvl_row)
+
         # Arch-extra fields
         form = QFormLayout()
         self.model_name_in = QLineEdit()
         self.model_name_in.setPlaceholderText("(model_name override)")
-        form.addRow("model_name:", self.model_name_in)
+        form.addRow("--model_name:", self.model_name_in)
 
         self.interior_only_cb = QCheckBox("--interior_only")
         form.addRow(self.interior_only_cb)
 
-        self.max_pr_in = QLineEdit("1.0")
-        form.addRow("--max_pruning_ratio:", self.max_pr_in)
+        self.max_pr_in = QLineEdit("0.95")
+        form.addRow("--max_pruning_rate:", self.max_pr_in)
 
-        self.global_cb = QCheckBox("--global_pruning")
-        form.addRow(self.global_cb)
-        self.iso_cb = QCheckBox("--isomorphic")
-        form.addRow(self.iso_cb)
+        self.mac_target_cb = QCheckBox("--mac_target")
+        form.addRow(self.mac_target_cb)
+
+        # CNN-only knobs
+        self.bn_recalib_cb = QCheckBox("--bn_recalibration")
+        form.addRow(self.bn_recalib_cb)
+        self.bn_recalib_batches_in = QLineEdit("100")
+        self.bn_recalib_batches_label = QLabel("--bn_recalib_batches:")
+        form.addRow(self.bn_recalib_batches_label, self.bn_recalib_batches_in)
+        self.fold_bn_init_cb = QCheckBox("--fold_bn_init")
+        form.addRow(self.fold_bn_init_cb)
+        self.fold_bn_before_prune_cb = QCheckBox("--fold_bn_before_prune")
+        form.addRow(self.fold_bn_before_prune_cb)
 
         ckpt_row = QHBoxLayout()
         self.checkpoint_in = QLineEdit()
@@ -268,17 +301,30 @@ class _StepArch(QWidget):
         if path:
             self.checkpoint_in.setText(path)
 
+    def _is_cnn(self) -> bool:
+        for name, rb in self.arch_radios.items():
+            if rb.isChecked():
+                return ARCHS[name]["model_type"] == "cnn"
+        return False
+
+    def _refresh_cnn_only(self):
+        on = self._is_cnn()
+        for w in (self.bn_recalib_cb, self.bn_recalib_batches_in,
+                  self.bn_recalib_batches_label,
+                  self.fold_bn_init_cb, self.fold_bn_before_prune_cb):
+            w.setVisible(on)
+
     def _on_arch_toggled(self, checked: bool):
         if not checked:
             return
         for name, rb in self.arch_radios.items():
             if rb.isChecked():
                 self.interior_only_cb.setChecked(ARCHS[name]["interior_default"])
-                # Prefill model_name only if the arch ships one
                 ship = ARCHS[name]["model_name"]
                 if ship is not None and not self.model_name_in.text():
                     self.model_name_in.setText(ship)
                 break
+        self._refresh_cnn_only()
 
     def apply(self) -> None:
         for name, rb in self.arch_radios.items():
@@ -286,20 +332,39 @@ class _StepArch(QWidget):
                 cfg = ARCHS[name]
                 self.state["_arch_choice"] = name
                 self.state["model_type"] = cfg["model_type"]
-                if cfg["cnn_arch"] is not None and cfg["model_type"] == "cnn":
-                    self.state["model_name"] = None
+                if cfg["model_type"] == "cnn":
                     self.state["cnn_arch"] = cfg["cnn_arch"]
+                    self.state["model_name"] = None
                 else:
                     self.state["cnn_arch"] = None
                     name_text = self.model_name_in.text().strip()
                     self.state["model_name"] = name_text or cfg["model_name"]
                 break
 
+        # Pruning level
+        self.state["global_pruning"] = self.lvl_global.isChecked()
+        self.state["isomorphic"] = self.lvl_iso.isChecked()
+        self.state["_pruning_level"] = (
+            "global" if self.lvl_global.isChecked()
+            else ("isomorphic" if self.lvl_iso.isChecked() else "local")
+        )
+
         self.state["interior_only"] = self.interior_only_cb.isChecked()
-        v = _coerce(self.max_pr_in.text(), "float")
-        self.state["max_pruning_ratio"] = v
-        self.state["global_pruning"] = self.global_cb.isChecked()
-        self.state["isomorphic"] = self.iso_cb.isChecked()
+        self.state["max_pruning_rate"] = _coerce(self.max_pr_in.text(), "float")
+        self.state["mac_target"] = self.mac_target_cb.isChecked()
+
+        if self._is_cnn():
+            self.state["bn_recalibration"] = self.bn_recalib_cb.isChecked()
+            self.state["bn_recalib_batches"] = _coerce(
+                self.bn_recalib_batches_in.text(), "int")
+            self.state["fold_bn_init"] = self.fold_bn_init_cb.isChecked()
+            self.state["fold_bn_before_prune"] = \
+                self.fold_bn_before_prune_cb.isChecked()
+        else:
+            for k in ("bn_recalibration", "bn_recalib_batches",
+                      "fold_bn_init", "fold_bn_before_prune"):
+                self.state.pop(k, None)
+
         ck = self.checkpoint_in.text().strip()
         self.state["checkpoint"] = ck or None
 
@@ -314,12 +379,28 @@ class _StepArch(QWidget):
         choice = self.state.get("_arch_choice")
         if choice in self.arch_radios:
             self.arch_radios[choice].setChecked(True)
+
+        lvl = self.state.get("_pruning_level", "local")
+        if lvl == "global":
+            self.lvl_global.setChecked(True)
+        elif lvl == "isomorphic":
+            self.lvl_iso.setChecked(True)
+        else:
+            self.lvl_local.setChecked(True)
+
         if "interior_only" in self.state:
             self.interior_only_cb.setChecked(bool(self.state["interior_only"]))
-        if self.state.get("max_pruning_ratio") is not None:
-            self.max_pr_in.setText(str(self.state["max_pruning_ratio"]))
-        self.global_cb.setChecked(bool(self.state.get("global_pruning")))
-        self.iso_cb.setChecked(bool(self.state.get("isomorphic")))
+        if self.state.get("max_pruning_rate") is not None:
+            self.max_pr_in.setText(str(self.state["max_pruning_rate"]))
+        self.mac_target_cb.setChecked(bool(self.state.get("mac_target")))
+        self.bn_recalib_cb.setChecked(bool(self.state.get("bn_recalibration")))
+        if self.state.get("bn_recalib_batches") is not None:
+            self.bn_recalib_batches_in.setText(
+                str(self.state["bn_recalib_batches"]))
+        self.fold_bn_init_cb.setChecked(bool(self.state.get("fold_bn_init")))
+        self.fold_bn_before_prune_cb.setChecked(
+            bool(self.state.get("fold_bn_before_prune")))
+
         self.checkpoint_in.setText(self.state.get("checkpoint") or "")
         if self.state.get("model_name"):
             self.model_name_in.setText(self.state["model_name"])
@@ -333,6 +414,8 @@ class _StepArch(QWidget):
             else:
                 w.setText("" if v is None else str(v))
 
+        self._refresh_cnn_only()
+
     def validate(self) -> list[str]:
         errs: list[str] = []
         kr = self.state.get("keep_ratio")
@@ -342,6 +425,9 @@ class _StepArch(QWidget):
         if ck and not os.path.isfile(ck):
             errs.append(f"checkpoint file not found: {ck} (warning only)")
         return errs
+
+
+# ── Step 2: Criterion ────────────────────────────────────────────────────
 
 
 class _StepCriterion(QWidget):
@@ -360,47 +446,84 @@ class _StepCriterion(QWidget):
         self.crit_radios: dict[str, QRadioButton] = {}
         for name in CRITERIA:
             rb = QRadioButton(name)
-            rb.toggled.connect(self._refresh_extras)
+            rb.toggled.connect(self._refresh)
             self.crit_group.addButton(rb)
             crit_row.addWidget(rb)
             self.crit_radios[name] = rb
         crit_row.addStretch(1)
         outer.addLayout(crit_row)
 
+        # group_reduction (magnitude only)
+        gr_row = QHBoxLayout()
+        self.gr_label = QLabel("--group_reduction:")
+        self.gr_combo = QComboBox()
+        self.gr_combo.addItems(GROUP_REDUCTIONS)
+        gr_row.addWidget(self.gr_label)
+        gr_row.addWidget(self.gr_combo)
+        gr_row.addStretch(1)
+        outer.addLayout(gr_row)
+
         outer.addWidget(_hsep())
         outer.addWidget(QLabel("<b>Extras</b>"))
         self.extras_form = QFormLayout()
         self.extra_inputs: dict[str, QCheckBox] = {}
-        all_extras = sorted({e for c in CRITERIA.values() for e in c["extras"]})
+        all_extras = sorted(
+            {e for c in CRITERIA.values() for e in c["extras"]}
+        )
         for ex in all_extras:
             cb = QCheckBox(f"--{ex}")
             self.extras_form.addRow(cb)
             self.extra_inputs[ex] = cb
         outer.addLayout(self.extras_form)
+
+        # Advanced (importance_mode override + ranking blend params)
+        outer.addWidget(_hsep())
+        self.adv_toggle = QCheckBox("Show advanced (importance_mode / blends)")
+        self.adv_toggle.toggled.connect(self._refresh_adv)
+        outer.addWidget(self.adv_toggle)
+
+        self.adv_box = QGroupBox("Advanced")
+        adv = QFormLayout(self.adv_box)
+        self.imp_combo = QComboBox()
+        self.imp_combo.addItem("(default for criterion)")
+        self.imp_combo.addItems(IMPORTANCE_MODES)
+        adv.addRow("--importance_mode:", self.imp_combo)
+        self.alpha_in = QLineEdit("0.5")
+        adv.addRow("--alpha:", self.alpha_in)
+        self.wv_base_combo = QComboBox()
+        self.wv_base_combo.addItems(WV_BASE_MODES)
+        adv.addRow("--wv_base_mode:", self.wv_base_combo)
+        self.mag_delta_in = QLineEdit("0.2")
+        adv.addRow("--mag_guided_delta:", self.mag_delta_in)
+        self.norm_imp_cb = QCheckBox("--normalize_importance")
+        adv.addRow(self.norm_imp_cb)
+        outer.addWidget(self.adv_box)
         outer.addStretch(1)
 
         self.crit_radios["VBP"].setChecked(True)
-        self._refresh_extras()
-
-    def _refresh_extras(self):
-        choice = self._current_choice()
-        if not choice:
-            return
-        active = set(CRITERIA[choice]["extras"])
-        # CNN-only filter for no_recalib
-        is_cnn = self.state.get("model_type") == "cnn" \
-            or self.state.get("_arch_choice") in {"MNv2", "RN50"}
-        for ex, cb in self.extra_inputs.items():
-            visible = ex in active
-            if ex == "no_recalib" and not is_cnn:
-                visible = False
-            cb.setVisible(visible)
+        self._refresh()
+        self._refresh_adv(False)
 
     def _current_choice(self) -> str | None:
         for name, rb in self.crit_radios.items():
             if rb.isChecked():
                 return name
         return None
+
+    def _refresh(self):
+        choice = self._current_choice()
+        if not choice:
+            return
+        # group_reduction visible only for magnitude
+        is_mag = choice == "magnitude"
+        self.gr_label.setVisible(is_mag)
+        self.gr_combo.setVisible(is_mag)
+        active = set(CRITERIA[choice]["extras"])
+        for ex, cb in self.extra_inputs.items():
+            cb.setVisible(ex in active)
+
+    def _refresh_adv(self, on: bool):
+        self.adv_box.setVisible(bool(on))
 
     def apply(self) -> None:
         choice = self._current_choice()
@@ -409,8 +532,21 @@ class _StepCriterion(QWidget):
         cfg = CRITERIA[choice]
         self.state["_crit_choice"] = choice
         self.state["criterion"] = cfg["criterion"]
-        self.state["importance_mode"] = cfg["importance_mode"]
-        # Reset all extras first, then set those visible+checked
+
+        # Advanced: importance_mode override (if not "(default…)")
+        adv_mode = self.imp_combo.currentText()
+        if self.adv_toggle.isChecked() and adv_mode in IMPORTANCE_MODES:
+            self.state["importance_mode"] = adv_mode
+        else:
+            self.state["importance_mode"] = cfg["importance_mode"]
+
+        # group_reduction only for magnitude
+        if choice == "magnitude":
+            self.state["group_reduction"] = self.gr_combo.currentText()
+        else:
+            self.state.pop("group_reduction", None)
+
+        # Extras
         for ex in self.extra_inputs:
             if ex in cfg["extras"]:
                 cb = self.extra_inputs[ex]
@@ -418,16 +554,54 @@ class _StepCriterion(QWidget):
             else:
                 self.state[ex] = False
 
+        # Advanced numerics
+        if self.adv_toggle.isChecked():
+            self.state["alpha"] = _coerce(self.alpha_in.text(), "float")
+            self.state["wv_base_mode"] = self.wv_base_combo.currentText()
+            self.state["mag_guided_delta"] = _coerce(
+                self.mag_delta_in.text(), "float")
+            self.state["normalize_importance"] = self.norm_imp_cb.isChecked()
+        else:
+            for k in ("alpha", "wv_base_mode", "mag_guided_delta",
+                      "normalize_importance"):
+                self.state.pop(k, None)
+
     def populate(self) -> None:
         choice = self.state.get("_crit_choice")
         if choice in self.crit_radios:
             self.crit_radios[choice].setChecked(True)
+        if "group_reduction" in self.state:
+            idx = self.gr_combo.findText(self.state["group_reduction"])
+            if idx >= 0:
+                self.gr_combo.setCurrentIndex(idx)
         for ex, cb in self.extra_inputs.items():
             cb.setChecked(bool(self.state.get(ex, False)))
-        self._refresh_extras()
+        if any(k in self.state for k in
+               ("alpha", "wv_base_mode", "mag_guided_delta",
+                "normalize_importance")):
+            self.adv_toggle.setChecked(True)
+            if self.state.get("importance_mode") in IMPORTANCE_MODES:
+                idx = self.imp_combo.findText(self.state["importance_mode"])
+                if idx >= 0:
+                    self.imp_combo.setCurrentIndex(idx)
+            if self.state.get("alpha") is not None:
+                self.alpha_in.setText(str(self.state["alpha"]))
+            if self.state.get("wv_base_mode") in WV_BASE_MODES:
+                idx = self.wv_base_combo.findText(self.state["wv_base_mode"])
+                if idx >= 0:
+                    self.wv_base_combo.setCurrentIndex(idx)
+            if self.state.get("mag_guided_delta") is not None:
+                self.mag_delta_in.setText(str(self.state["mag_guided_delta"]))
+            self.norm_imp_cb.setChecked(
+                bool(self.state.get("normalize_importance")))
+        self._refresh()
+        self._refresh_adv(self.adv_toggle.isChecked())
 
     def validate(self) -> list[str]:
         return []
+
+
+# ── Step 3: Regularization ───────────────────────────────────────────────
 
 
 class _StepReg(QWidget):
@@ -451,7 +625,6 @@ class _StepReg(QWidget):
         row.addStretch(1)
         outer.addLayout(row)
 
-        # sparse_mode dropdown + dynamic block
         self.mode_box = QGroupBox("Sparse mode")
         mode_layout = QVBoxLayout(self.mode_box)
         sel_row = QHBoxLayout()
@@ -478,7 +651,6 @@ class _StepReg(QWidget):
         self.mode_box.setVisible(self.yes_rb.isChecked())
 
     def _rebuild_block(self, mode: str):
-        # Clear
         while self.block_form.rowCount() > 0:
             self.block_form.removeRow(0)
         self._block_inputs.clear()
@@ -494,20 +666,16 @@ class _StepReg(QWidget):
                 self._block_inputs[name] = w
 
     def apply(self) -> None:
+        all_keys = {n for items in SPARSE_MODES.values() for n, _, _ in items}
         if self.no_rb.isChecked():
             self.state["sparse_mode"] = "none"
             self.state["_reg_yes"] = False
-            for name, _, _ in (
-                SPARSE_MODES["l1_group"] + SPARSE_MODES["gmp"]
-                + SPARSE_MODES["reparam"] + SPARSE_MODES["group_norm"]
-            ):
-                self.state.pop(name, None)
+            for k in all_keys:
+                self.state.pop(k, None)
             return
         mode = self.mode_combo.currentText()
         self.state["_reg_yes"] = True
         self.state["sparse_mode"] = mode
-        # Clear other-mode keys, then write current
-        all_keys = {n for items in SPARSE_MODES.values() for n, _, _ in items}
         for k in all_keys:
             self.state.pop(k, None)
         for name, atype, _ in SPARSE_MODES[mode]:
@@ -525,7 +693,8 @@ class _StepReg(QWidget):
             if idx >= 0:
                 self.mode_combo.setCurrentIndex(idx)
             self._rebuild_block(self.mode_combo.currentText())
-            for name, atype, _ in SPARSE_MODES.get(self.mode_combo.currentText(), []):
+            for name, atype, _ in SPARSE_MODES.get(
+                    self.mode_combo.currentText(), []):
                 if name in self.state:
                     w = self._block_inputs[name]
                     v = self.state[name]
@@ -541,6 +710,9 @@ class _StepReg(QWidget):
         return []
 
 
+# ── Step 4: Fine-tuning / PAT / KD ───────────────────────────────────────
+
+
 class _StepFT(QWidget):
     title = "4. Fine-tuning"
 
@@ -550,42 +722,49 @@ class _StepFT(QWidget):
         self.on_change = on_change
 
         outer = QVBoxLayout(self)
-        outer.addWidget(QLabel("<b>Fine-tuning</b>"))
+        outer.addWidget(QLabel("<b>Optimizer / FT loop</b>"))
 
         form = QFormLayout()
+        self.lr_in = QLineEdit("1.5e-5")
+        form.addRow("--lr:", self.lr_in)
+        self.ft_lr_in = QLineEdit()
+        self.ft_lr_in.setPlaceholderText("(blank = use --lr)")
+        form.addRow("--ft_lr:", self.ft_lr_in)
+        self.opt_combo = QComboBox()
+        self.opt_combo.addItems(["adamw", "sgd"])
+        form.addRow("--opt:", self.opt_combo)
+        self.wd_in = QLineEdit("0.01")
+        form.addRow("--wd:", self.wd_in)
+
         self.epochs_ft = QLineEdit("10")
         form.addRow("--epochs_ft:", self.epochs_ft)
-        self.lr_ft = QLineEdit("1.5e-5")
-        form.addRow("--lr_ft:", self.lr_ft)
-        self.opt_ft = QComboBox()
-        self.opt_ft.addItems(["adamw", "sgd"])
-        self.opt_ft.currentTextChanged.connect(self._refresh_opt)
-        form.addRow("--opt_ft:", self.opt_ft)
-        self.momentum_ft = QLineEdit("0.9")
-        self.momentum_label = QLabel("--momentum_ft:")
-        form.addRow(self.momentum_label, self.momentum_ft)
-        self.wd_ft = QLineEdit()
-        self.wd_ft.setPlaceholderText("(blank = auto)")
-        form.addRow("--wd_ft:", self.wd_ft)
-        outer.addLayout(form)
+        self.ft_warmup_in = QLineEdit("0")
+        form.addRow("--ft_warmup_epochs:", self.ft_warmup_in)
+        self.ft_eta_min_in = QLineEdit("1e-8")
+        form.addRow("--ft_eta_min:", self.ft_eta_min_in)
 
+        self.sched_combo = QComboBox()
+        self.sched_combo.addItems(PRUNING_SCHEDULES)
+        form.addRow("--pruning_schedule:", self.sched_combo)
+        self.no_mask_only_cb = QCheckBox("--no_mask_only")
+        form.addRow(self.no_mask_only_cb)
+
+        outer.addLayout(form)
         outer.addWidget(_hsep())
 
         # PAT block
-        self.pat_cb = QCheckBox("Iterative PAT?")
-        self.pat_cb.toggled.connect(self._refresh_pat)
-        outer.addWidget(self.pat_cb)
-        self.pat_box = QGroupBox("PAT params")
-        pat_form = QFormLayout(self.pat_box)
-        self.pat_steps = QLineEdit("5")
+        outer.addWidget(QLabel("<b>PAT schedule</b>"))
+        pat_form = QFormLayout()
+        self.pat_steps = QLineEdit("1")
         pat_form.addRow("--pat_steps:", self.pat_steps)
-        self.pat_eps = QLineEdit("3")
+        self.pat_eps = QLineEdit("0")
         pat_form.addRow("--pat_epochs_per_step:", self.pat_eps)
         self.var_loss_w = QLineEdit("0.0")
         pat_form.addRow("--var_loss_weight:", self.var_loss_w)
         self.reparam_during_pat_cb = QCheckBox("--reparam_during_pat")
         pat_form.addRow(self.reparam_during_pat_cb)
-        outer.addWidget(self.pat_box)
+        outer.addLayout(pat_form)
+        outer.addWidget(_hsep())
 
         # KD block
         self.kd_cb = QCheckBox("Use KD?")
@@ -600,41 +779,34 @@ class _StepFT(QWidget):
         outer.addWidget(self.kd_box)
         outer.addStretch(1)
 
-        self._refresh_opt(self.opt_ft.currentText())
-        self._refresh_pat(False)
         self._refresh_kd(False)
-
-    def _refresh_opt(self, v: str):
-        is_sgd = v == "sgd"
-        self.momentum_ft.setVisible(is_sgd)
-        self.momentum_label.setVisible(is_sgd)
-
-    def _refresh_pat(self, on: bool):
-        self.pat_box.setVisible(on)
 
     def _refresh_kd(self, on: bool):
         self.kd_box.setVisible(on)
 
     def apply(self) -> None:
-        self.state["epochs_ft"] = _coerce(self.epochs_ft.text(), "int")
-        self.state["lr_ft"] = _coerce(self.lr_ft.text(), "float")
-        self.state["opt_ft"] = self.opt_ft.currentText()
-        if self.opt_ft.currentText() == "sgd":
-            self.state["momentum_ft"] = _coerce(self.momentum_ft.text(), "float")
+        self.state["lr"] = _coerce(self.lr_in.text(), "float")
+        ft_lr = _coerce(self.ft_lr_in.text(), "float")
+        if ft_lr is None:
+            self.state.pop("ft_lr", None)
         else:
-            self.state["momentum_ft"] = None
-        self.state["wd_ft"] = _coerce(self.wd_ft.text(), "float")
+            self.state["ft_lr"] = ft_lr
+        self.state["opt"] = self.opt_combo.currentText()
+        self.state["wd"] = _coerce(self.wd_in.text(), "float")
 
-        if self.pat_cb.isChecked():
-            self.state["pat"] = True
-            self.state["pat_steps"] = _coerce(self.pat_steps.text(), "int")
-            self.state["pat_epochs_per_step"] = _coerce(self.pat_eps.text(), "int")
-            self.state["var_loss_weight"] = _coerce(self.var_loss_w.text(), "float")
-            self.state["reparam_during_pat"] = self.reparam_during_pat_cb.isChecked()
-        else:
-            for k in ("pat", "pat_steps", "pat_epochs_per_step",
-                      "var_loss_weight", "reparam_during_pat"):
-                self.state.pop(k, None)
+        self.state["epochs_ft"] = _coerce(self.epochs_ft.text(), "int")
+        self.state["ft_warmup_epochs"] = _coerce(
+            self.ft_warmup_in.text(), "float")
+        self.state["ft_eta_min"] = _coerce(self.ft_eta_min_in.text(), "float")
+        self.state["pruning_schedule"] = self.sched_combo.currentText()
+        self.state["no_mask_only"] = self.no_mask_only_cb.isChecked()
+
+        self.state["pat_steps"] = _coerce(self.pat_steps.text(), "int")
+        self.state["pat_epochs_per_step"] = _coerce(
+            self.pat_eps.text(), "int")
+        self.state["var_loss_weight"] = _coerce(self.var_loss_w.text(), "float")
+        self.state["reparam_during_pat"] = \
+            self.reparam_during_pat_cb.isChecked()
 
         if self.kd_cb.isChecked():
             self.state["use_kd"] = True
@@ -645,20 +817,28 @@ class _StepFT(QWidget):
                 self.state.pop(k, None)
 
     def populate(self) -> None:
+        if self.state.get("lr") is not None:
+            self.lr_in.setText(str(self.state["lr"]))
+        if self.state.get("ft_lr") is not None:
+            self.ft_lr_in.setText(str(self.state["ft_lr"]))
+        opt = self.state.get("opt", "adamw")
+        idx = self.opt_combo.findText(opt)
+        if idx >= 0:
+            self.opt_combo.setCurrentIndex(idx)
+        if self.state.get("wd") is not None:
+            self.wd_in.setText(str(self.state["wd"]))
         if self.state.get("epochs_ft") is not None:
             self.epochs_ft.setText(str(self.state["epochs_ft"]))
-        if self.state.get("lr_ft") is not None:
-            self.lr_ft.setText(str(self.state["lr_ft"]))
-        opt = self.state.get("opt_ft", "adamw")
-        idx = self.opt_ft.findText(opt)
+        if self.state.get("ft_warmup_epochs") is not None:
+            self.ft_warmup_in.setText(str(self.state["ft_warmup_epochs"]))
+        if self.state.get("ft_eta_min") is not None:
+            self.ft_eta_min_in.setText(str(self.state["ft_eta_min"]))
+        sched = self.state.get("pruning_schedule", "geometric")
+        idx = self.sched_combo.findText(sched)
         if idx >= 0:
-            self.opt_ft.setCurrentIndex(idx)
-        if self.state.get("momentum_ft") is not None:
-            self.momentum_ft.setText(str(self.state["momentum_ft"]))
-        wd = self.state.get("wd_ft")
-        self.wd_ft.setText("" if wd is None else str(wd))
+            self.sched_combo.setCurrentIndex(idx)
+        self.no_mask_only_cb.setChecked(bool(self.state.get("no_mask_only")))
 
-        self.pat_cb.setChecked(bool(self.state.get("pat")))
         if self.state.get("pat_steps") is not None:
             self.pat_steps.setText(str(self.state["pat_steps"]))
         if self.state.get("pat_epochs_per_step") is not None:
@@ -676,14 +856,16 @@ class _StepFT(QWidget):
 
     def validate(self) -> list[str]:
         errs: list[str] = []
-        if self.pat_cb.isChecked():
-            ps = _coerce(self.pat_steps.text(), "int")
-            pe = _coerce(self.pat_eps.text(), "int")
-            if ps is None or ps < 1:
-                errs.append("pat_steps must be ≥ 1.")
-            if pe is None or pe < 0:
-                errs.append("pat_epochs_per_step must be ≥ 0.")
+        ps = _coerce(self.pat_steps.text(), "int")
+        pe = _coerce(self.pat_eps.text(), "int")
+        if ps is None or ps < 1:
+            errs.append("pat_steps must be ≥ 1.")
+        if pe is None or pe < 0:
+            errs.append("pat_epochs_per_step must be ≥ 0.")
         return errs
+
+
+# ── Final review page ───────────────────────────────────────────────────
 
 
 class _StepFinal(QWidget):
@@ -730,7 +912,6 @@ class _StepFinal(QWidget):
         self.cmd_view.setPlainText(" ".join(shlex.quote(p) for p in cmd))
 
     def apply(self) -> None:
-        # Final page is read-only
         return
 
     def validate(self) -> list[str]:
@@ -748,7 +929,6 @@ class VBPWizardScreen(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 8, 8, 8)
 
-        # Top: script path + breadcrumb
         path_row = QHBoxLayout()
         path_row.addWidget(QLabel("Script:"))
         self.script_in = QLineEdit(get_torch_pruning_script())
@@ -764,7 +944,6 @@ class VBPWizardScreen(QWidget):
         self.crumb = QLabel()
         outer.addWidget(self.crumb)
 
-        # Stack
         self.stack = QStackedWidget()
         self.steps: list[QWidget] = [
             _StepArch(self.state, self._on_state_change),
@@ -777,7 +956,6 @@ class VBPWizardScreen(QWidget):
             self.stack.addWidget(w)
         outer.addWidget(self.stack, stretch=1)
 
-        # Nav
         nav = QHBoxLayout()
         self.btn_back = QPushButton("Back")
         self.btn_back.clicked.connect(self._go_back)
@@ -788,7 +966,6 @@ class VBPWizardScreen(QWidget):
         nav.addStretch(1)
         outer.addLayout(nav)
 
-        # Wire final page buttons (need handlers on this widget)
         final: _StepFinal = self.steps[-1]
         final.btn_run.clicked.connect(self._run_now)
         final.btn_save.clicked.connect(self._save_preset)
@@ -797,7 +974,6 @@ class VBPWizardScreen(QWidget):
         self.stack.setCurrentIndex(0)
         self._update_nav()
 
-    # ── Navigation ────────────────────────────────────────────────────
     def _update_nav(self):
         idx = self.stack.currentIndex()
         last = self.stack.count() - 1
@@ -838,13 +1014,12 @@ class VBPWizardScreen(QWidget):
         self._update_nav()
 
     def _on_state_change(self):
-        # Currently unused; reserved for cross-step reactions.
         pass
 
-    # ── Actions ───────────────────────────────────────────────────────
     def _pick_script(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select vbp_imagenet_pat.py", os.path.dirname(self.script_in.text()),
+            self, "Select vbp_imagenet_pat.py",
+            os.path.dirname(self.script_in.text()),
             "Python (*.py);;All (*)",
         )
         if path:
@@ -870,7 +1045,8 @@ class VBPWizardScreen(QWidget):
         crit = self.state.get("_crit_choice", "crit")
         log_path = os.path.join(log_dir, f"{arch}_{crit}_{ts}.log")
 
-        final.log.appendPlainText(f"$ {' '.join(shlex.quote(p) for p in cmd)}")
+        final.log.appendPlainText(
+            f"$ {' '.join(shlex.quote(p) for p in cmd)}")
         final.log.appendPlainText(f"[log: {log_path}]")
         final.log.repaint()
         try:
@@ -888,7 +1064,6 @@ class VBPWizardScreen(QWidget):
         name, ok = QInputDialog.getText(self, "Save preset", "Name:")
         if not ok or not name.strip():
             return
-        # Snapshot whatever the current step has into state
         idx = self.stack.currentIndex()
         cur: Any = self.steps[idx]
         cur.apply()
@@ -909,7 +1084,8 @@ class VBPWizardScreen(QWidget):
         os.makedirs(PRESET_DIR, exist_ok=True)
         files = sorted(f for f in os.listdir(PRESET_DIR) if f.endswith(".json"))
         if not files:
-            QMessageBox.information(self, "No presets", f"No presets in {PRESET_DIR}")
+            QMessageBox.information(
+                self, "No presets", f"No presets in {PRESET_DIR}")
             return
         choice, ok = QInputDialog.getItem(
             self, "Load preset", "Pick:", files, 0, False,
@@ -928,6 +1104,5 @@ class VBPWizardScreen(QWidget):
         for w in self.steps:
             if hasattr(w, "populate"):
                 w.populate()
-        # Refresh final preview
         final: _StepFinal = self.steps[-1]
         final.populate()
