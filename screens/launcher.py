@@ -7,6 +7,7 @@ keep_ratio in the range, render run_ddp_<r>.sh and dispatch via wrapper cmd.
 
 import json
 import os
+import shlex
 import subprocess
 from typing import Any
 
@@ -15,8 +16,9 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
-    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
-    QPushButton, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
+    QPlainTextEdit, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from config import get_project_path
@@ -57,6 +59,32 @@ def _sweep_values(e_s: float, e_e: float, step: float) -> list[float]:
     if e_e == 0:
         e_e = e_s - 0.01
     return [round(float(r), 2) for r in np.arange(e_s, e_e, -step)]
+
+
+def _parse_sh(text: str) -> dict:
+    """Parse run_ddp.sh-like content; return {flag: value_or_True}."""
+    cleaned = text.replace("\\\n", " ")
+    try:
+        tokens = shlex.split(cleaned, comments=True, posix=True)
+    except ValueError:
+        tokens = cleaned.split()
+    parsed: dict = {}
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t.startswith("--") and len(t) > 2:
+            body = t[2:]
+            if "=" in body:
+                k, v = body.split("=", 1)
+                parsed[k] = v
+            else:
+                if i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
+                    parsed[body] = tokens[i + 1]
+                    i += 1
+                else:
+                    parsed[body] = True
+        i += 1
+    return parsed
 
 
 class _SchemaEditDialog(QDialog):
@@ -166,6 +194,11 @@ class LauncherScreen(QWidget):
         self.btn_edit_defaults.clicked.connect(self._on_edit_defaults)
         btn_row.addWidget(self.btn_edit_defaults)
 
+        self.btn_load_sh = QPushButton("Load from .sh")
+        self.btn_load_sh.setToolTip("Override values from existing run_ddp_<r>.sh")
+        self.btn_load_sh.clicked.connect(self._on_load_sh)
+        btn_row.addWidget(self.btn_load_sh)
+
         self.btn_launch = QPushButton("Launch sweep")
         self.btn_launch.clicked.connect(self._on_launch)
         btn_row.addWidget(self.btn_launch)
@@ -251,6 +284,69 @@ class LauncherScreen(QWidget):
     # ── Actions ───────────────────────────────────────────────────────
     def _on_new_run(self):
         self._populate_table_from_defaults()
+
+    def _on_load_sh(self):
+        if not self._subtype:
+            return
+        vbp_root = self._root_path or get_project_path("VBP") or ""
+        start = (os.path.join(vbp_root, self._subtype)
+                 if vbp_root and os.path.isdir(os.path.join(vbp_root, self._subtype))
+                 else os.path.expanduser("~"))
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select run_ddp.sh", start,
+            "Shell scripts (*.sh);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r") as f:
+                text = f.read()
+        except OSError as e:
+            QMessageBox.warning(self, "Read error", str(e))
+            return
+
+        parsed = _parse_sh(text)
+        kr_arg = self._schema.get("kr_arg", "keep_ratio")
+        save_dir_arg = self._schema.get("save_dir_arg", "save_dir")
+
+        # Apply parsed values to table (skip derived args)
+        schema_args = self._schema.get("args", [])
+        skip = {kr_arg, save_dir_arg}
+        matched: list[str] = []
+        for i, arg in enumerate(schema_args):
+            name = arg["name"]
+            if name in skip or name not in parsed:
+                continue
+            atype = arg.get("type", "str")
+            v = parsed[name]
+            if atype == "bool":
+                holder = self.table.cellWidget(i, 1)
+                cb = holder.findChild(QCheckBox) if holder else None
+                if cb:
+                    cb.setChecked(True if v is True else bool(v))
+            else:
+                item = self.table.item(i, 1)
+                if item is not None:
+                    item.setText(str(v))
+            matched.append(name)
+
+        # Auto-fill e_s from parsed keep_ratio
+        e_s_msg = ""
+        if kr_arg in parsed and parsed[kr_arg] is not True:
+            try:
+                kr_val = float(parsed[kr_arg])
+                self.e_s.setValue(kr_val)
+                e_s_msg = f", e_s={kr_val}"
+            except (TypeError, ValueError):
+                pass
+
+        schema_names = {a["name"] for a in schema_args}
+        unknown = sorted(k for k in parsed if k not in schema_names and k not in skip)
+        unk_msg = f", ignored: {unknown}" if unknown else ""
+        self._append_log(
+            f"[loaded {os.path.basename(path)}: {len(matched)} args overridden"
+            f"{e_s_msg}{unk_msg}]"
+        )
 
     def _on_edit_defaults(self):
         if not self._subtype:
