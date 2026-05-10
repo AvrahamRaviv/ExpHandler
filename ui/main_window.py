@@ -3,10 +3,10 @@
 import os
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QTabWidget, QTabBar,
-    QFileDialog, QStatusBar, QMessageBox,
+    QFileDialog, QStatusBar, QMessageBox, QApplication,
 )
 
-from config import get_project_path, save_project_path, DEFAULT_PATHS
+from config import get_project_path, save_project_path, DEFAULT_PATHS, get_theme, save_theme
 from scanners.dvnr import scan_dvnr
 from scanners.odt import scan_odt
 from scanners.vbp import scan_vbp
@@ -15,6 +15,7 @@ from screens.plots import PlotsScreen
 from screens.monitor import MonitorScreen
 from screens.launcher import LauncherScreen
 from screens.vbp_wizard import VBPWizardScreen
+from ui import theme
 from ui.sidebar import Sidebar
 
 _SCANNERS = {"DVNR": scan_dvnr, "ODT": scan_odt, "VBP": scan_vbp}
@@ -43,12 +44,13 @@ class MainWindow(QMainWindow):
         self.sidebar.project_selected.connect(self._on_project_selected)
         self.sidebar.change_path_requested.connect(self._on_change_path)
         self.sidebar.refresh_requested.connect(self._on_refresh)
+        self.sidebar.theme_toggle_requested.connect(self._on_theme_toggle)
         h_layout.addWidget(self.sidebar)
 
-        sep = QWidget()
-        sep.setFixedWidth(1)
-        sep.setStyleSheet("background-color: #2d3748;")
-        h_layout.addWidget(sep)
+        self._sep = QWidget()
+        self._sep.setFixedWidth(1)
+        self._sep.setStyleSheet(f"background-color: {theme.BORDER};")
+        h_layout.addWidget(self._sep)
 
         content = QWidget()
         content_layout = QVBoxLayout(content)
@@ -85,6 +87,17 @@ class MainWindow(QMainWindow):
         self.status = QStatusBar()
         self.setStatusBar(self.status)
         self.status.showMessage("Select a project from the sidebar.")
+
+    # ── Theme handling ───────────────────────────────────────────────
+    def _on_theme_toggle(self):
+        next_theme = "light" if theme.current_theme == "dark" else "dark"
+        theme.set_theme(next_theme)
+        save_theme(next_theme)
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(theme.QSS)
+        self._sep.setStyleSheet(f"background-color: {theme.BORDER};")
+        self.sidebar.refresh_styles()
 
     # ── Project selection ────────────────────────────────────────────
     def _on_project_selected(self, project: str):

@@ -1,29 +1,71 @@
-"""Global dark theme — 'Research Terminal' aesthetic."""
+"""Theming: palette-driven QSS with multiple themes.
 
-# ── Palette ───────────────────────────────────────────────────────────────────
-BG_DEEP     = "#0a0e1a"
-BG_SURFACE  = "#111827"
-BG_ELEVATED = "#1f2937"
-BG_HOVER    = "#374151"
-BORDER      = "#2d3748"
-BORDER_LIT  = "#4b5563"
+Add a new theme by appending to PALETTES below. Status colors are kept
+theme-independent so monitor coloring stays consistent.
+"""
 
-TEXT_PRIMARY   = "#f0f4f8"
-TEXT_SECONDARY = "#8b9ab0"
-TEXT_DIM       = "#4b5563"
+# ── Status colors (theme-independent) ────────────────────────────────────────
+C_SUCCESS = "#10b981"   # green  — DONE
+C_RUN     = "#f59e0b"   # amber  — RUN
+C_ERROR   = "#f87171"   # red    — EXIT
+C_PENDING = "#6b7280"   # gray   — PEND/WAIT
+C_UNKNOWN = "#374151"   # muted  — unknown
 
-ACCENT       = "#06b6d4"   # cyan-500
-ACCENT_DARK  = "#0891b2"
-ACCENT_DIM   = "#164e63"
 
-C_SUCCESS  = "#10b981"   # green  — DONE
-C_RUN      = "#f59e0b"   # amber  — RUN
-C_ERROR    = "#f87171"   # red    — EXIT
-C_PENDING  = "#6b7280"   # gray   — PEND/WAIT
-C_UNKNOWN  = "#374151"   # muted  — unknown
+# ── Palettes ─────────────────────────────────────────────────────────────────
+PALETTES: dict[str, dict] = {
+    "dark": {
+        "BG_DEEP":     "#0a0e1a",
+        "BG_SURFACE":  "#111827",
+        "BG_ELEVATED": "#1f2937",
+        "BG_HOVER":    "#374151",
+        "BG_ALT_ROW":  "#131c2e",
+        "BORDER":      "#2d3748",
+        "BORDER_LIT":  "#4b5563",
+        "TEXT_PRIMARY":   "#f0f4f8",
+        "TEXT_SECONDARY": "#8b9ab0",
+        "TEXT_DIM":       "#4b5563",
+        "ACCENT":      "#06b6d4",
+        "ACCENT_DARK": "#0891b2",
+        "ACCENT_DIM":  "#164e63",
+        "TEXTEDIT_FG": "#a7f3d0",
+        "DIFF_HIGHLIGHT": "#3b2a1c",
+    },
+    "light": {
+        "BG_DEEP":     "#eef1f5",
+        "BG_SURFACE":  "#ffffff",
+        "BG_ELEVATED": "#f3f5f8",
+        "BG_HOVER":    "#e2e8f0",
+        "BG_ALT_ROW":  "#f7f9fc",
+        "BORDER":      "#d1d5db",
+        "BORDER_LIT":  "#9ca3af",
+        "TEXT_PRIMARY":   "#0f172a",
+        "TEXT_SECONDARY": "#475569",
+        "TEXT_DIM":       "#94a3b8",
+        "ACCENT":      "#0e7490",
+        "ACCENT_DARK": "#155e75",
+        "ACCENT_DIM":  "#cffafe",
+        "TEXTEDIT_FG": "#065f46",
+        "DIFF_HIGHLIGHT": "#fff4d6",
+    },
+}
 
-# ── Stylesheet ────────────────────────────────────────────────────────────────
-QSS = f"""
+DEFAULT_THEME = "dark"
+
+# Module-level constants (rebound on theme switch). Initialized below.
+BG_DEEP = BG_SURFACE = BG_ELEVATED = BG_HOVER = BG_ALT_ROW = ""
+BORDER = BORDER_LIT = ""
+TEXT_PRIMARY = TEXT_SECONDARY = TEXT_DIM = ""
+ACCENT = ACCENT_DARK = ACCENT_DIM = ""
+TEXTEDIT_FG = ""
+DIFF_HIGHLIGHT = ""
+
+current_theme: str = DEFAULT_THEME
+QSS: str = ""
+
+
+def _build_qss() -> str:
+    return f"""
 /* ── Base ─────────────────────────────────────────────── */
 QWidget {{
     background-color: {BG_SURFACE};
@@ -71,7 +113,7 @@ QTabBar::tab:hover:!selected {{
 /* ── Tables ───────────────────────────────────────────── */
 QTableWidget {{
     background-color: {BG_SURFACE};
-    alternate-background-color: #131c2e;
+    alternate-background-color: {BG_ALT_ROW};
     gridline-color: {BORDER};
     color: {TEXT_PRIMARY};
     border: 1px solid {BORDER};
@@ -223,11 +265,11 @@ QGroupBox::title {{
 }}
 
 /* ── TextEdit ─────────────────────────────────────────── */
-QTextEdit {{
+QTextEdit, QPlainTextEdit {{
     background: {BG_DEEP};
     border: 1px solid {BORDER};
     border-radius: 6px;
-    color: #a7f3d0;
+    color: {TEXTEDIT_FG};
     font-family: "JetBrains Mono", "Cascadia Code", "Fira Code", "Menlo", monospace;
     font-size: 12px;
     padding: 8px;
@@ -272,4 +314,64 @@ QMessageBox QPushButton {{
 QFileDialog {{
     background: {BG_ELEVATED};
 }}
+
+/* ── Lists ────────────────────────────────────────────── */
+QListWidget {{
+    background: {BG_SURFACE};
+    color: {TEXT_PRIMARY};
+    border: 1px solid {BORDER};
+    border-radius: 6px;
+    selection-background-color: {ACCENT_DIM};
+    selection-color: {TEXT_PRIMARY};
+}}
+QListWidget::item:hover {{
+    background: {BG_HOVER};
+}}
+
+/* ── ComboBox ─────────────────────────────────────────── */
+QComboBox {{
+    background: {BG_ELEVATED};
+    color: {TEXT_PRIMARY};
+    border: 1px solid {BORDER};
+    border-radius: 6px;
+    padding: 4px 8px;
+}}
+QComboBox QAbstractItemView {{
+    background: {BG_ELEVATED};
+    color: {TEXT_PRIMARY};
+    selection-background-color: {ACCENT_DIM};
+    border: 1px solid {BORDER};
+}}
 """
+
+
+def set_theme(name: str):
+    """Switch active theme: rebinds module constants and rebuilds QSS."""
+    global current_theme, QSS
+    global BG_DEEP, BG_SURFACE, BG_ELEVATED, BG_HOVER, BG_ALT_ROW
+    global BORDER, BORDER_LIT
+    global TEXT_PRIMARY, TEXT_SECONDARY, TEXT_DIM
+    global ACCENT, ACCENT_DARK, ACCENT_DIM
+    global TEXTEDIT_FG, DIFF_HIGHLIGHT
+    if name not in PALETTES:
+        name = DEFAULT_THEME
+    current_theme = name
+    p = PALETTES[name]
+    BG_DEEP, BG_SURFACE = p["BG_DEEP"], p["BG_SURFACE"]
+    BG_ELEVATED, BG_HOVER, BG_ALT_ROW = p["BG_ELEVATED"], p["BG_HOVER"], p["BG_ALT_ROW"]
+    BORDER, BORDER_LIT = p["BORDER"], p["BORDER_LIT"]
+    TEXT_PRIMARY, TEXT_SECONDARY, TEXT_DIM = (
+        p["TEXT_PRIMARY"], p["TEXT_SECONDARY"], p["TEXT_DIM"]
+    )
+    ACCENT, ACCENT_DARK, ACCENT_DIM = p["ACCENT"], p["ACCENT_DARK"], p["ACCENT_DIM"]
+    TEXTEDIT_FG = p["TEXTEDIT_FG"]
+    DIFF_HIGHLIGHT = p["DIFF_HIGHLIGHT"]
+    QSS = _build_qss()
+
+
+def get_themes() -> list[str]:
+    return list(PALETTES.keys())
+
+
+# Initial bind
+set_theme(DEFAULT_THEME)

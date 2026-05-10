@@ -57,3 +57,15 @@ def save_torch_pruning_script(path: str):
     cfg["torch_pruning_script"] = path
     with open(CONFIG_PATH, "w") as f:
         json.dump(cfg, f, indent=2)
+
+
+def get_theme() -> str:
+    cfg = load_config()
+    return cfg.get("theme") or "dark"
+
+
+def save_theme(name: str):
+    cfg = load_config()
+    cfg["theme"] = name
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(cfg, f, indent=2)
