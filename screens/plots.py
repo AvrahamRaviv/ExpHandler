@@ -582,33 +582,57 @@ class PlotsScreen(QWidget):
 
         plotted = False
         for exp in matching:
-            ft_eps = [e for e in exp.get("epochs", []) if e["phase"].upper() == "FT"]
+            epochs = exp.get("epochs", [])
+            pat_eps = sorted(
+                (e for e in epochs if e["phase"].upper() == "PAT"),
+                key=lambda e: e["epoch"],
+            )
+            ft_eps = sorted(
+                (e for e in epochs if e["phase"].upper() == "FT"),
+                key=lambda e: e["epoch"],
+            )
             if max_epoch is not None:
                 ft_eps = [e for e in ft_eps if e["epoch"] <= max_epoch]
-            if not ft_eps:
+
+            ret_acc = None
+            retentions = exp.get("step_retentions") or []
+            if retentions:
+                ret_acc = retentions[-1].get("acc")
+
+            # Build cumulative trajectory: PAT → retention → FT
+            xs: list[float] = []
+            ys: list[float] = []
+            ret_idx: int | None = None
+            x = 1
+            for e in pat_eps:
+                xs.append(x); ys.append(e["val_acc"] * 100); x += 1
+            if ret_acc is not None:
+                ret_idx = len(xs)
+                xs.append(x); ys.append(ret_acc * 100); x += 1
+            for e in ft_eps:
+                xs.append(x); ys.append(e["val_acc"] * 100); x += 1
+
+            if not xs:
                 continue
-            xs = [e["epoch"] for e in ft_eps]
-            ys = [e["val_acc"] * 100 for e in ft_eps]
+
             color = setup_color[exp["setup"]]
             kr = exp.get("keep_ratio", "")
             kr_label = f"{kr:.2f}" if isinstance(kr, float) else str(kr)
             ax.plot(xs, ys, marker="o", markersize=3, color=color,
                     label=f"{exp['setup']} / kr={kr_label}")
-            retentions = exp.get("step_retentions") or []
-            if retentions:
-                ret_acc = retentions[-1].get("acc")
-                if ret_acc is not None:
-                    ax.scatter([0], [ret_acc * 100], color=color, marker="x",
-                               s=50, zorder=4)
+            # Overlay X marker at retention so the prune boundary is visible.
+            if ret_idx is not None:
+                ax.scatter([xs[ret_idx]], [ys[ret_idx]], color=color,
+                           marker="x", s=60, zorder=5)
             plotted = True
 
         if not plotted:
-            self._empty("No FT epoch data in selection")
+            self._empty("No epoch data in selection")
             return
 
-        ax.set_xlabel("Epoch (FT)")
+        ax.set_xlabel("Cumulative epoch (PAT → prune → FT)")
         ax.set_ylabel("Val Accuracy (%)")
-        ax.set_title("VBP — FT Validation Accuracy Curves")
+        ax.set_title("VBP — Training Trajectory (X = retention after prune)")
         ax.grid(True, alpha=0.3)
         if matching:
             ax.legend(**self._legend_kwargs(len(matching), base=7.0))
