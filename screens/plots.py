@@ -401,6 +401,18 @@ class PlotsScreen(QWidget):
                 self._plot_vbp()
             self.canvas.draw()
 
+    # ── Legend helpers ────────────────────────────────────────────────
+    @staticmethod
+    def _legend_kwargs(n: int, base: float = 8.0) -> dict:
+        if n <= 0:
+            return {"fontsize": base}
+        if n <= 10:
+            return {"fontsize": base}
+        # Reduce font for each extra entry past 10. Floor at 4pt.
+        fs = max(4.0, base - 0.3 * (n - 10))
+        ncol = 1 if n <= 16 else (2 if n <= 32 else 3)
+        return {"fontsize": fs, "ncol": ncol}
+
     # ── DVNR ──────────────────────────────────────────────────────────
     def _plot_dvnr(self):
         selected_exps = self._selected_exp_names()
@@ -424,8 +436,9 @@ class PlotsScreen(QWidget):
         ax.set_ylabel("Loss")
         ax.set_title("DVNR — Loss curves")
         ax.grid(True, alpha=0.3)
-        if len(selected_exps) * len(selected_losses) <= 10:
-            ax.legend(fontsize=8)
+        n = len(selected_exps) * len(selected_losses)
+        if n > 0:
+            ax.legend(**self._legend_kwargs(n, base=8.0))
 
     # ── ODT ───────────────────────────────────────────────────────────
     def _show_odt_table(self):
@@ -532,7 +545,7 @@ class PlotsScreen(QWidget):
         handles = [Line2D([0], [0], marker="o", color="w",
                           markerfacecolor=setup_color[s], markersize=8, label=s)
                    for s in setups]
-        ax.legend(handles=handles, fontsize=8)
+        ax.legend(handles=handles, **self._legend_kwargs(len(setups), base=8.0))
         ax.set_xlabel("Pruned MACs (G)")
         ax.set_ylabel("Best Accuracy (%)")
         ax.set_title("VBP — Best Accuracy vs. Pruned MACs")
@@ -597,8 +610,8 @@ class PlotsScreen(QWidget):
         ax.set_ylabel("Val Accuracy (%)")
         ax.set_title("VBP — FT Validation Accuracy Curves")
         ax.grid(True, alpha=0.3)
-        if len(matching) <= 12:
-            ax.legend(fontsize=7)
+        if matching:
+            ax.legend(**self._legend_kwargs(len(matching), base=7.0))
 
     def _empty(self, msg: str = ""):
         ax = self.figure.add_subplot(111)
