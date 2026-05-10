@@ -582,11 +582,11 @@ class PlotsScreen(QWidget):
 
         plotted = False
         for exp in matching:
+            # Preserve log order, then split: anything not FT = pre-FT
+            # (covers PAT, SPARSE, or any other tag). FT epochs sorted
+            # so the max-epoch filter behaves predictably.
             epochs = exp.get("epochs", [])
-            pat_eps = sorted(
-                (e for e in epochs if e["phase"].upper() == "PAT"),
-                key=lambda e: e["epoch"],
-            )
+            pre_eps = [e for e in epochs if e["phase"].upper() != "FT"]
             ft_eps = sorted(
                 (e for e in epochs if e["phase"].upper() == "FT"),
                 key=lambda e: e["epoch"],
@@ -599,31 +599,42 @@ class PlotsScreen(QWidget):
             if retentions:
                 ret_acc = retentions[-1].get("acc")
 
-            # Build cumulative trajectory: PAT → retention → FT
-            xs: list[float] = []
-            ys: list[float] = []
-            ret_idx: int | None = None
-            x = 1
-            for e in pat_eps:
-                xs.append(x); ys.append(e["val_acc"] * 100); x += 1
-            if ret_acc is not None:
-                ret_idx = len(xs)
-                xs.append(x); ys.append(ret_acc * 100); x += 1
-            for e in ft_eps:
-                xs.append(x); ys.append(e["val_acc"] * 100); x += 1
+            n_pre = len(pre_eps)
+            xs_pre = list(range(1, n_pre + 1))
+            ys_pre = [e["val_acc"] * 100 for e in pre_eps]
 
-            if not xs:
+            ret_x = ret_y = None
+            if ret_acc is not None:
+                ret_x = n_pre + 1
+                ret_y = ret_acc * 100
+
+            ft_offset = (n_pre + 2) if ret_acc is not None else (n_pre + 1)
+            xs_ft = list(range(ft_offset, ft_offset + len(ft_eps)))
+            ys_ft = [e["val_acc"] * 100 for e in ft_eps]
+
+            if not xs_pre and not xs_ft and ret_x is None:
                 continue
 
             color = setup_color[exp["setup"]]
             kr = exp.get("keep_ratio", "")
             kr_label = f"{kr:.2f}" if isinstance(kr, float) else str(kr)
-            ax.plot(xs, ys, marker="o", markersize=3, color=color,
-                    label=f"{exp['setup']} / kr={kr_label}")
-            # Overlay X marker at retention so the prune boundary is visible.
-            if ret_idx is not None:
-                ax.scatter([xs[ret_idx]], [ys[ret_idx]], color=color,
-                           marker="x", s=60, zorder=5)
+            label = f"{exp['setup']} / kr={kr_label}"
+
+            # Pre-FT and FT are drawn as separate segments so the line
+            # never connects through the retention point — keeps the
+            # post-prune drop visible without a misleading slope.
+            if xs_pre:
+                ax.plot(xs_pre, ys_pre, marker="o", markersize=3,
+                        color=color, label=label)
+                label = None
+            if xs_ft:
+                ax.plot(xs_ft, ys_ft, marker="o", markersize=3,
+                        color=color, label=label)
+                label = None
+            if ret_x is not None:
+                ax.scatter([ret_x], [ret_y], color=color, marker="x",
+                           s=60, zorder=5, label=label)
+                label = None
             plotted = True
 
         if not plotted:
