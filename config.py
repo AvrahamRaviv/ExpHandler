@@ -11,7 +11,7 @@ LSF_LOG_DIR = "/algo/ws/shared/remote-gpu/log/avrahamra/"
 
 # Default starting directory when opening the folder picker for the first time
 DEFAULT_PATHS = {
-    "DVNR": "/algo/NetOptimization/outputs/DVNR/",
+    "DVNR": "/algo/NetOptimization/outputs/DOF/",
     "ODT":  "/home/avrahamra/PycharmProjects/experiments/ODT_CP/",
     "VBP":  "/algo/NetOptimization/outputs/VBP/",
     "DOF":  "/algo/NetOptimization/outputs/DOF/",
