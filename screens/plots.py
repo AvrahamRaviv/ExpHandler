@@ -254,6 +254,20 @@ class PlotsScreen(QWidget):
             self.loss_box.setVisible(True)
             self.right_stack.setCurrentIndex(0)
 
+        elif project == "DOF":
+            for exp in data:
+                item = QListWidgetItem(exp["exp_name"])
+                self.exp_list.addItem(item)
+                item.setSelected(exp["exp_name"] in prev_exps)
+            if data:
+                for k in data[0]["losses"].keys():
+                    item = QListWidgetItem(k)
+                    self.loss_list.addItem(item)
+                    item.setSelected(k in prev_losses if prev_losses
+                                     else k == "total_loss")
+            self.loss_box.setVisible(True)
+            self.right_stack.setCurrentIndex(0)
+
         elif project == "ODT":
             _DEFAULT_EXPS = {"infer_float", "infer_float_mx_wa_afs_int8"}
             exp_select = prev_exps if prev_exps else _DEFAULT_EXPS
@@ -397,6 +411,8 @@ class PlotsScreen(QWidget):
             self.figure.clear()
             if self._project == "DVNR":
                 self._plot_dvnr()
+            elif self._project == "DOF":
+                self._plot_dof()
             elif self._project == "VBP":
                 self._plot_vbp()
             self.canvas.draw()
@@ -415,6 +431,13 @@ class PlotsScreen(QWidget):
 
     # ── DVNR ──────────────────────────────────────────────────────────
     def _plot_dvnr(self):
+        self._plot_loss_curves(title="DVNR — Loss curves", strip_prefix="debug_MX_")
+
+    # ── DOF ───────────────────────────────────────────────────────────
+    def _plot_dof(self):
+        self._plot_loss_curves(title="DOF — Loss curves")
+
+    def _plot_loss_curves(self, title: str, strip_prefix: str = ""):
         selected_exps = self._selected_exp_names()
         selected_losses = self._selected_losses()
         if not selected_exps or not selected_losses:
@@ -428,13 +451,13 @@ class PlotsScreen(QWidget):
                 continue
             for loss_key in selected_losses:
                 values = exp["losses"].get(loss_key, [])
-                legend_name = exp_name.replace("debug_MX_", "")
+                legend_name = exp_name.replace(strip_prefix, "") if strip_prefix else exp_name
                 ax.plot(range(1, len(values) + 1), values,
                         marker="o", markersize=3,
                         label=f"{legend_name} / {loss_key}")
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Loss")
-        ax.set_title("DVNR — Loss curves")
+        ax.set_title(title)
         ax.grid(True, alpha=0.3)
         n = len(selected_exps) * len(selected_losses)
         if n > 0:

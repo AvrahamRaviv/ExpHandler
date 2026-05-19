@@ -136,7 +136,7 @@ class RunsScreen(QWidget):
         self.filter_input.clear()
         self.filter_input.blockSignals(False)
 
-        if project == "DVNR":
+        if project in ("DVNR", "DOF"):
             self._load_dvnr(data)
         elif project == "ODT":
             self._load_odt(data)
@@ -245,7 +245,7 @@ class RunsScreen(QWidget):
         exp = self._data[data_idx]
         lines = []
 
-        if self._project == "DVNR":
+        if self._project in ("DVNR", "DOF"):
             lines.append(f"Experiment : {exp['exp_name']}")
             lines.append(f"Epochs     : {exp['n_epochs']}")
             lines.append("")
