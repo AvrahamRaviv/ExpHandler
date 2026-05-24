@@ -6,10 +6,12 @@ from PyQt5.QtWidgets import (
     QPushButton, QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView,
     QStackedWidget, QComboBox,
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
+
+from config import get_plots_default, save_plots_default
 
 
 class PlotsScreen(QWidget):
@@ -17,6 +19,9 @@ class PlotsScreen(QWidget):
         super().__init__(parent)
         self._data: list = []
         self._project: str = ""
+        # In-session per-project selection cache. Survives project switches
+        # while the app is running. Persisted defaults live in config json.
+        self._selections: dict[str, dict] = {}
 
         splitter = QSplitter(Qt.Horizontal)
 
@@ -162,6 +167,15 @@ class PlotsScreen(QWidget):
         kr_layout.addWidget(self.kr_list)
         selector_layout.addWidget(self.kr_box)
 
+        # Save current selection as the persisted default for this project.
+        self.save_default_btn = QPushButton("⭐ Save as default")
+        self.save_default_btn.setFixedHeight(26)
+        self.save_default_btn.setToolTip(
+            "Save current selection as the default for this project (persists across launches)"
+        )
+        self.save_default_btn.clicked.connect(self._save_current_as_default)
+        selector_layout.addWidget(self.save_default_btn)
+
         selector_widget.setMinimumWidth(190)
         selector_widget.setMaximumWidth(300)
         splitter.addWidget(selector_widget)
@@ -197,27 +211,46 @@ class PlotsScreen(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(splitter)
 
+    # ── Selection cache helpers ───────────────────────────────────────
+    def _snapshot_current_selection(self) -> dict:
+        return {
+            "exps": [self.exp_list.item(i).text()
+                     for i in range(self.exp_list.count())
+                     if self.exp_list.item(i).isSelected()],
+            "losses": [self.loss_list.item(i).text()
+                       for i in range(self.loss_list.count())
+                       if self.loss_list.item(i).isSelected()],
+            "metrics": [self.metric_list.item(i).text()
+                        for i in range(self.metric_list.count())
+                        if self.metric_list.item(i).isSelected()],
+            "krs": [self.kr_list.item(i).data(Qt.UserRole)
+                    for i in range(self.kr_list.count())
+                    if self.kr_list.item(i).isSelected()],
+        }
+
+    def _resolve(self, project: str, kind: str, hardcoded: set | None) -> set:
+        """Pick selection set for `kind`: in-session cache > persisted > hardcoded."""
+        sess = self._selections.get(project, {}).get(kind)
+        if sess is not None:
+            return set(sess)
+        persisted = get_plots_default(project)
+        if kind in persisted:
+            return set(persisted[kind])
+        return set(hardcoded) if hardcoded else set()
+
+    def _save_current_as_default(self):
+        if not self._project:
+            return
+        save_plots_default(self._project, self._snapshot_current_selection())
+        original = self.save_default_btn.text()
+        self.save_default_btn.setText("✓ Saved")
+        QTimer.singleShot(1500, lambda: self.save_default_btn.setText(original))
+
     # ── Load ─────────────────────────────────────────────────────────
     def load(self, project: str, data: list):
-        # Snapshot selection so refresh / re-load preserves user choices
-        same_project = (project == self._project)
-        prev_exps: set = set()
-        prev_losses: set = set()
-        prev_metrics: set = set()
-        prev_krs: set = set()
-        if same_project:
-            prev_exps = {self.exp_list.item(i).text()
-                         for i in range(self.exp_list.count())
-                         if self.exp_list.item(i).isSelected()}
-            prev_losses = {self.loss_list.item(i).text()
-                           for i in range(self.loss_list.count())
-                           if self.loss_list.item(i).isSelected()}
-            prev_metrics = {self.metric_list.item(i).text()
-                            for i in range(self.metric_list.count())
-                            if self.metric_list.item(i).isSelected()}
-            prev_krs = {self.kr_list.item(i).data(Qt.UserRole)
-                        for i in range(self.kr_list.count())
-                        if self.kr_list.item(i).isSelected()}
+        # Snapshot outgoing project's selection so switching back restores it.
+        if self._project and self.exp_list.count() > 0:
+            self._selections[self._project] = self._snapshot_current_selection()
 
         self._project = project
         self._data = data
@@ -240,7 +273,8 @@ class PlotsScreen(QWidget):
                 "debug_MX_rdb_attn_dwds_out_int8",
                 "debug_MX_rdb_attn_dwds_out_int8_lff_int12",
             }
-            exp_select = prev_exps if prev_exps else _DEFAULT_EXPS
+            exp_select = self._resolve(project, "exps", _DEFAULT_EXPS)
+            loss_select = self._resolve(project, "losses", {"loss_nr"})
             for exp in data:
                 item = QListWidgetItem(exp["exp_name"])
                 self.exp_list.addItem(item)
@@ -249,42 +283,41 @@ class PlotsScreen(QWidget):
                 for k in data[0]["losses"].keys():
                     item = QListWidgetItem(k)
                     self.loss_list.addItem(item)
-                    item.setSelected(k in prev_losses if prev_losses
-                                     else k == "loss_nr")
+                    item.setSelected(k in loss_select)
             self.loss_box.setVisible(True)
             self.right_stack.setCurrentIndex(0)
 
         elif project == "DOF":
+            exp_select = self._resolve(project, "exps", None)
+            loss_select = self._resolve(project, "losses", {"total_loss"})
             for exp in data:
                 item = QListWidgetItem(exp["exp_name"])
                 self.exp_list.addItem(item)
-                item.setSelected(exp["exp_name"] in prev_exps)
+                item.setSelected(exp["exp_name"] in exp_select)
             if data:
                 for k in data[0]["losses"].keys():
                     item = QListWidgetItem(k)
                     self.loss_list.addItem(item)
-                    item.setSelected(k in prev_losses if prev_losses
-                                     else k == "total_loss")
+                    item.setSelected(k in loss_select)
             self.loss_box.setVisible(True)
             self.right_stack.setCurrentIndex(0)
 
         elif project == "ODT":
             _DEFAULT_EXPS = {"infer_float", "infer_float_mx_wa_afs_int8"}
-            exp_select = prev_exps if prev_exps else _DEFAULT_EXPS
+            exp_select = self._resolve(project, "exps", _DEFAULT_EXPS)
+            metric_select = self._resolve(project, "metrics", {"total_metric"})
             for exp in data:
                 item = QListWidgetItem(exp["exp_name"])
                 self.exp_list.addItem(item)
                 item.setSelected(exp["exp_name"] in exp_select)
             self.loss_box.setVisible(False)
-            # Populate metric list; select only total_metric by default
             all_keys = []
             for exp in data:
                 all_keys.extend(k for k in exp["metrics"] if k not in all_keys)
             for k in all_keys:
                 item = QListWidgetItem(k)
                 self.metric_list.addItem(item)
-                item.setSelected(k in prev_metrics if prev_metrics
-                                 else k == "total_metric")
+                item.setSelected(k in metric_select)
             self.metric_box.setVisible(True)
             self.right_stack.setCurrentIndex(1)
 
@@ -295,8 +328,8 @@ class PlotsScreen(QWidget):
                 "global_dvp_10vnr_ft200",
                 "global_dp_ft200",
             }
-            setup_select = prev_exps if prev_exps else _DEFAULT_SETUPS
-            # Unique setups
+            setup_select = self._resolve(project, "exps", _DEFAULT_SETUPS)
+            kr_select = self._resolve(project, "krs", None)
             seen_setups = []
             for exp in data:
                 if exp["setup"] not in seen_setups:
@@ -305,7 +338,6 @@ class PlotsScreen(QWidget):
                 item = QListWidgetItem(s)
                 self.exp_list.addItem(item)
                 item.setSelected(s in setup_select)
-            # Unique keep ratios, sorted
             seen_krs = []
             for exp in data:
                 kr = exp.get("keep_ratio")
@@ -317,7 +349,7 @@ class PlotsScreen(QWidget):
                 item = QListWidgetItem(label)
                 item.setData(Qt.UserRole, kr)
                 self.kr_list.addItem(item)
-                item.setSelected(kr in prev_krs)
+                item.setSelected(kr in kr_select)
             self.loss_box.setVisible(False)
             self.metric_box.setVisible(False)
             self.kr_box.setVisible(True)

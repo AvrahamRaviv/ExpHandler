@@ -70,3 +70,18 @@ def save_theme(name: str):
     cfg["theme"] = name
     with open(CONFIG_PATH, "w") as f:
         json.dump(cfg, f, indent=2)
+
+
+def get_plots_default(project: str) -> dict:
+    """Per-project saved Plots-screen selection. Empty dict if none."""
+    cfg = load_config()
+    return (cfg.get(project) or {}).get("plots_default") or {}
+
+
+def save_plots_default(project: str, selection: dict):
+    cfg = load_config()
+    if project not in cfg:
+        cfg[project] = {}
+    cfg[project]["plots_default"] = selection
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(cfg, f, indent=2)
