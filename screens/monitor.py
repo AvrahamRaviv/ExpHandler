@@ -36,6 +36,13 @@ _LSF_STAT_MAP = {
 }
 _UNKNOWN_STATUS = ("Unknown", _C_UNKNOWN)
 
+# NORMNET status comes from <save_tag>_run.json ("running" | "done").
+_NORMNET_STAT_MAP = {
+    "done":    ("Complete",    _C_COMPLETE),
+    "running": ("In Progress", _C_IN_PROGRESS),
+    "unknown": ("Unknown",     _C_UNKNOWN),
+}
+
 # ── LSF helpers ───────────────────────────────────────────────────────────────
 
 def _shell(cmd: str) -> str:
@@ -199,6 +206,8 @@ def _reconstruct_command(rows: list[tuple[str, str]]) -> str:
 def _display_name(project: str, exp: dict) -> str:
     if project == "VBP":
         return f"{exp['setup']} / {exp['kr_folder']}"
+    if project == "NORMNET":
+        return exp.get("name", "")
     return exp.get("exp_name", "")
 
 
@@ -328,7 +337,9 @@ class MonitorScreen(QWidget):
     # ── Internal ──────────────────────────────────────────────────────
 
     def _fill_table(self):
-        lsf_index = _build_lsf_index()
+        # NORMNET runs locally (single-process, --disable_ddp): no LSF/bjobs.
+        # Status comes from run.json; command from the parsed log line.
+        lsf_index = {} if self._project == "NORMNET" else _build_lsf_index()
 
         self.table.clearContents()
         self.table.setRowCount(0)
@@ -344,15 +355,21 @@ class MonitorScreen(QWidget):
 
         for exp in self._data:
             dname = _display_name(self._project, exp)
-            keys  = _lsf_keys(self._project, exp)
 
-            lsf_info = next(
-                (lsf_index[k] for k in keys if k in lsf_index),
-                None,
-            )
-            label, color = (lsf_info["label"], lsf_info["color"]) \
-                if lsf_info else _UNKNOWN_STATUS
-            command = lsf_info["command"] if lsf_info else ""
+            if self._project == "NORMNET":
+                label, color = _NORMNET_STAT_MAP.get(
+                    exp.get("status", ""), _UNKNOWN_STATUS)
+                command = exp.get("command", "")
+                lsf_info = None
+            else:
+                keys = _lsf_keys(self._project, exp)
+                lsf_info = next(
+                    (lsf_index[k] for k in keys if k in lsf_index),
+                    None,
+                )
+                label, color = (lsf_info["label"], lsf_info["color"]) \
+                    if lsf_info else _UNKNOWN_STATUS
+                command = lsf_info["command"] if lsf_info else ""
 
             self._exp_infos.append({
                 "display_name": dname,

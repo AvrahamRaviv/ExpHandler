@@ -22,6 +22,9 @@ class PlotsScreen(QWidget):
         # In-session per-project selection cache. Survives project switches
         # while the app is running. Persisted defaults live in config json.
         self._selections: dict[str, dict] = {}
+        # NORMNET metric selection, cached per view (curves vs vnorm use
+        # different stat sets, so they can't share one "losses" slot).
+        self._nn_metric_sel: dict[str, set] = {}
 
         splitter = QSplitter(Qt.Horizontal)
 
@@ -62,6 +65,18 @@ class PlotsScreen(QWidget):
         self.exp_list.setSelectionMode(QAbstractItemView.MultiSelection)
         self.exp_list.itemSelectionChanged.connect(self._update_plot)
         selector_layout.addWidget(self.exp_list)
+
+        # View selector (NORMNET only): curves / pair compare / V-norm health
+        self.nn_plot_type_box = QGroupBox("View")
+        self.nn_plot_type_box.setVisible(False)
+        nn_pt_layout = QVBoxLayout(self.nn_plot_type_box)
+        self.nn_plot_type = QComboBox()
+        self.nn_plot_type.addItem("Curves (per run)", "curves")
+        self.nn_plot_type.addItem("Pair compare (val_acc + Δ)", "pairs")
+        self.nn_plot_type.addItem("V-norm health", "vnorm")
+        self.nn_plot_type.currentIndexChanged.connect(self._on_nn_plot_type_changed)
+        nn_pt_layout.addWidget(self.nn_plot_type)
+        selector_layout.addWidget(self.nn_plot_type_box)
 
         # Loss key selector (DVNR only)
         self.loss_box = QGroupBox("Loss keys")
@@ -355,14 +370,27 @@ class PlotsScreen(QWidget):
             self.kr_box.setVisible(True)
             self.right_stack.setCurrentIndex(0)
 
+        elif project == "NORMNET":
+            exp_select = self._resolve(project, "exps", None)
+            for exp in data:
+                item = QListWidgetItem(exp["name"])
+                self.exp_list.addItem(item)
+                item.setSelected(exp["name"] in exp_select)
+            self.metric_box.setVisible(False)
+            self.kr_box.setVisible(False)
+            self._populate_nn_metric_list()   # sets loss_list items + loss_box
+            self.right_stack.setCurrentIndex(0)
+
         self.exp_list.blockSignals(False)
         self.loss_list.blockSignals(False)
         self.metric_list.blockSignals(False)
         self.kr_list.blockSignals(False)
         self.filter_input.blockSignals(False)
-        self.exp_label.setText("Setups" if project == "VBP" else "Experiments")
+        _labels = {"VBP": "Setups", "NORMNET": "Runs"}
+        self.exp_label.setText(_labels.get(project, "Experiments"))
         self.kr_box.setVisible(project == "VBP")
         self.vbp_plot_type_box.setVisible(project == "VBP")
+        self.nn_plot_type_box.setVisible(project == "NORMNET")
         self._update_vbp_max_epoch_visibility()
         self._update_plot()
 
@@ -375,6 +403,40 @@ class PlotsScreen(QWidget):
               and self.vbp_plot_type.currentData() == "ft_curves")
         self.vbp_max_epoch_label.setVisible(ft)
         self.vbp_max_epoch.setVisible(ft)
+
+    # ── NORMNET view handling ─────────────────────────────────────────
+    _NN_CURVE_METRICS = ["train_loss", "val_loss", "val_acc", "lr"]
+    _NN_VNORM_STATS = ["mean", "median", "std",
+                       "frac_below_0_01", "frac_below_0_1", "frac_below_1_0"]
+
+    def _on_nn_plot_type_changed(self):
+        if self._project != "NORMNET":
+            return
+        self._populate_nn_metric_list()
+        self._update_plot()
+
+    def _populate_nn_metric_list(self):
+        """Fill the metric list for the current NORMNET view; pairs has none."""
+        pt = self.nn_plot_type.currentData()
+        if pt == "vnorm":
+            items, default = self._NN_VNORM_STATS, {"mean", "median"}
+            title, show = "V-norm stats", True
+        elif pt == "pairs":
+            items, default, title, show = [], set(), "Metrics", False
+        else:  # curves
+            items, default = self._NN_CURVE_METRICS, {"val_acc"}
+            title, show = "Metrics", True
+        sel = self._nn_metric_sel.get(pt, default)
+
+        self.loss_list.blockSignals(True)
+        self.loss_list.clear()
+        for k in items:
+            it = QListWidgetItem(k)
+            self.loss_list.addItem(it)
+            it.setSelected(k in sel)
+        self.loss_list.blockSignals(False)
+        self.loss_box.setTitle(title)
+        self.loss_box.setVisible(show)
 
     # ── Filters ──────────────────────────────────────────────────────
     def _apply_metric_filter(self, text: str):
@@ -447,6 +509,8 @@ class PlotsScreen(QWidget):
                 self._plot_dof()
             elif self._project == "VBP":
                 self._plot_vbp()
+            elif self._project == "NORMNET":
+                self._plot_normnet()
             self.canvas.draw()
 
     # ── Legend helpers ────────────────────────────────────────────────
@@ -702,6 +766,121 @@ class PlotsScreen(QWidget):
         ax.grid(True, alpha=0.3)
         if matching:
             ax.legend(**self._legend_kwargs(len(matching), base=7.0))
+
+    # ── NORMNET ───────────────────────────────────────────────────────
+    def _selected_nn_runs(self) -> list:
+        names = set(self._selected_exp_names())
+        return [e for e in self._data if e.get("name") in names]
+
+    def _plot_normnet(self):
+        pt = self.nn_plot_type.currentData()
+        if pt == "pairs":
+            self._plot_normnet_pairs()
+        elif pt == "vnorm":
+            self._plot_normnet_vnorm()
+        else:
+            self._plot_normnet_curves()
+
+    def _plot_normnet_curves(self):
+        runs = self._selected_nn_runs()
+        metrics = self._selected_losses()
+        self._nn_metric_sel["curves"] = set(metrics)
+        if not runs or not metrics:
+            self._empty("Select runs and metrics")
+            return
+        n = len(metrics)
+        for mi, metric in enumerate(metrics):
+            ax = self.figure.add_subplot(n, 1, mi + 1)
+            for exp in runs:
+                eps = exp.get("epochs", [])
+                xs = [e["epoch"] for e in eps if e.get(metric) is not None]
+                ys = [e[metric] for e in eps if e.get(metric) is not None]
+                if not xs:
+                    continue
+                arm = exp.get("arm", "")
+                ls = "-" if arm == "normalized" else "--"
+                ax.plot(xs, ys, marker="o", markersize=3, linestyle=ls,
+                        label=f"{exp['name']} [{arm[:4]}]")
+            if metric == "lr":
+                ax.set_yscale("log")
+            ax.set_ylabel(metric)
+            ax.grid(True, alpha=0.3)
+            if mi == n - 1:
+                ax.set_xlabel("Epoch")
+            if mi == 0:
+                ax.set_title("NORMNET — per-run curves (— normalized, -- baseline)")
+                ax.legend(**self._legend_kwargs(len(runs)))
+
+    def _plot_normnet_pairs(self):
+        import matplotlib.cm as mcm
+        from scanners.normnet import pair_runs
+
+        runs = self._selected_nn_runs()
+        if not runs:
+            self._empty("Select runs (normalized + baseline)")
+            return
+        pairs = [p for p in pair_runs(runs)
+                 if p["normalized"] and p["baseline"]]
+        if not pairs:
+            self._empty("No complete normalized+baseline pair in selection")
+            return
+
+        ax = self.figure.add_subplot(2, 1, 1)
+        ax2 = self.figure.add_subplot(2, 1, 2)
+        cmap = mcm.get_cmap("tab10")
+        for i, p in enumerate(pairs):
+            color = cmap(i % 10)
+            norm, base = p["normalized"], p["baseline"]
+            lbl = p["label"]
+            ax.plot([e["epoch"] for e in norm["epochs"]],
+                    [e["val_acc"] * 100 for e in norm["epochs"]],
+                    marker="o", markersize=3, color=color, label=f"{lbl} norm")
+            ax.plot([e["epoch"] for e in base["epochs"]],
+                    [e["val_acc"] * 100 for e in base["epochs"]],
+                    marker="s", markersize=3, linestyle="--", color=color,
+                    label=f"{lbl} base")
+            bmap = {e["epoch"]: e["val_acc"] for e in base["epochs"]}
+            dxs = [e["epoch"] for e in norm["epochs"] if e["epoch"] in bmap]
+            dys = [(e["val_acc"] - bmap[e["epoch"]]) * 100
+                   for e in norm["epochs"] if e["epoch"] in bmap]
+            ax2.plot(dxs, dys, marker="o", markersize=3, color=color, label=lbl)
+
+        ax.set_ylabel("Val acc (%)")
+        ax.set_title("NORMNET — val_acc: normalized vs baseline")
+        ax.grid(True, alpha=0.3)
+        ax.legend(**self._legend_kwargs(len(pairs) * 2, base=7.0))
+
+        ax2.axhline(0, color="gray", linewidth=0.8)
+        ax2.set_xlabel("Epoch")
+        ax2.set_ylabel("Δ val_acc (pp)")
+        ax2.grid(True, alpha=0.3)
+        dbest = ", ".join(
+            f"{p['label']}: {p['delta_best'] * 100:+.2f}pp"
+            for p in pairs if p["delta_best"] is not None
+        )
+        ax2.set_title(f"Δ best_val_acc — {dbest}" if dbest
+                      else "Δ val_acc per epoch (norm − base)")
+
+    def _plot_normnet_vnorm(self):
+        runs = [e for e in self._selected_nn_runs() if e.get("vnorm")]
+        stats = self._selected_losses()
+        self._nn_metric_sel["vnorm"] = set(stats)
+        if not runs or not stats:
+            self._empty("Select normalized run(s) with V-norm data and stat(s)")
+            return
+        ax = self.figure.add_subplot(111)
+        for exp in runs:
+            vn = exp["vnorm"]
+            xs = [v["idx"] for v in vn]
+            for stat in stats:
+                ys = [v.get(stat) for v in vn]
+                ax.plot(xs, ys, marker="o", markersize=3,
+                        label=f"{exp['name']} / {stat}")
+        ax.set_xlabel("V-norm snapshot (0 = post-reparam, then per epoch)")
+        ax.set_ylabel("value")
+        ax.set_title("NORMNET — per-layer V-norm aggregate over training")
+        ax.grid(True, alpha=0.3)
+        ax.legend(**self._legend_kwargs(len(runs) * len(stats), base=7.0))
 
     def _empty(self, msg: str = ""):
         ax = self.figure.add_subplot(111)

@@ -26,6 +26,13 @@ def _fmt(v) -> str:
     return str(v)
 
 
+def _run_label(r: dict) -> str:
+    """Column header for a run in the compare table (VBP or NORMNET)."""
+    if "setup" in r:
+        return f"{r['setup']}/{r['kr_folder']}"
+    return r.get("name", "?")
+
+
 def _fmt_hp(v) -> str:
     """Compact format for hyperparam comparison cells."""
     if v is None:
@@ -142,6 +149,8 @@ class RunsScreen(QWidget):
             self._load_odt(data)
         elif project == "VBP":
             self._load_vbp(data)
+        elif project == "NORMNET":
+            self._load_normnet(data)
 
     # ------------------------------------------------------------------
     def _set_columns(self, headers: list[str]):
@@ -203,6 +212,26 @@ class RunsScreen(QWidget):
             self._add_row(row, i)
         self.table.resizeColumnsToContents()
 
+    def _load_normnet(self, data: list):
+        # One row per run; Δ best = normalized − baseline shown on each paired
+        # row (same value both arms). Pairs join on matched config.
+        headers = ["Run", "Arm", "Status", "Model", "Epochs", "LR", "WD",
+                   "Pre-acc", "Best Acc", "Δ best (pair)", "MACs (G)", "Params (M)"]
+        self._set_columns(headers)
+        for i, exp in enumerate(data):
+            cfg = exp.get("config") or {}
+            model = cfg.get("cnn_arch") or cfg.get("model_name", "")
+            ep = f"{exp.get('n_epochs', 0)}/{exp.get('target_epochs') or '?'}"
+            row = [
+                exp.get("name", ""), exp.get("arm", ""), exp.get("status", ""),
+                model, ep, cfg.get("lr"), cfg.get("wd"),
+                exp.get("pre_train_val_acc"), exp.get("best_val_acc"),
+                exp.get("paired_delta_best"),
+                exp.get("macs_g"), exp.get("params_m"),
+            ]
+            self._add_row(row, i)
+        self.table.resizeColumnsToContents()
+
     # ------------------------------------------------------------------
     def _selected_data_indices(self) -> list[int]:
         """Unique data indices from selected rows, in selection order."""
@@ -225,8 +254,8 @@ class RunsScreen(QWidget):
             self.detail_box.setVisible(False)
             return
 
-        # Compare mode: 2+ runs (VBP only — others lack rich hyperparams)
-        if len(indices) >= 2 and self._project == "VBP":
+        # Compare mode: 2+ runs (VBP / NORMNET — both carry rich hyperparams)
+        if len(indices) >= 2 and self._project in ("VBP", "NORMNET"):
             self._compare_indices = indices
             self.compare_bar.setVisible(True)
             self.detail_stack.setCurrentIndex(1)
@@ -275,8 +304,46 @@ class RunsScreen(QWidget):
                 for k, v in ret[-1].items():
                     lines.append(f"  {k:<40} {_fmt(v)}")
 
+        elif self._project == "NORMNET":
+            lines.append(f"Run      : {exp.get('name', '')}")
+            lines.append(f"Arm      : {exp.get('arm', '')}   Status: {exp.get('status', '')}")
+            partner = exp.get("partner_name")
+            dlt = exp.get("paired_delta_best")
+            lines.append(f"Pair     : {exp.get('pair_label', '—')}")
+            lines.append(f"Partner  : {partner or '— (no matching arm yet)'}")
+            if dlt is not None:
+                lines.append(f"Δ best_val_acc (norm − base): {dlt:+.4f}")
+            lines.append("")
+            lines.append("── Summary ──")
+            for k in ("pre_train_val_acc", "best_val_acc", "macs_g", "params_m",
+                      "n_epochs", "target_epochs"):
+                lines.append(f"  {k:<40} {_fmt(exp.get(k))}")
+            lines.append("")
+            lines.append("── Checkpoints ──")
+            ckpts = exp.get("checkpoints") or {}
+            if ckpts:
+                for k, v in ckpts.items():
+                    lines.append(f"  {k:<16} {v}")
+            else:
+                lines.append("  — (none written yet)")
+            lines.append(f"  metrics_file     {exp.get('metrics_file', '')}")
+            vnorm = exp.get("vnorm") or []
+            if vnorm:
+                last = vnorm[-1]
+                lines.append("")
+                lines.append(f"── V-norm aggregate (latest, {last['target']}) ──")
+                lines.append(f"  layers/channels  {last['n_layers']} / {last['n_channels']}")
+                for k in ("mean", "median", "std",
+                          "frac_below_0_01", "frac_below_0_1", "frac_below_1_0"):
+                    lines.append(f"  {k:<16} {_fmt(last.get(k))}")
+            lines.append("")
+            lines.append("── Config ──")
+            for k, v in (exp.get("config") or {}).items():
+                lines.append(f"  {k:<40} {_fmt(v)}")
+
         self.detail_text.setPlainText("\n".join(lines))
-        self.detail_box.setTitle(f"Detail — {exp.get('exp_name') or exp.get('setup', '')}")
+        self.detail_box.setTitle(
+            f"Detail — {exp.get('exp_name') or exp.get('name') or exp.get('setup', '')}")
         self.detail_box.setVisible(True)
 
     # ── Compare table ────────────────────────────────────────────────
@@ -285,7 +352,7 @@ class RunsScreen(QWidget):
         if not indices:
             return
         runs = [self._data[i] for i in indices]
-        labels = [f"{r['setup']}/{r['kr_folder']}" for r in runs]
+        labels = [_run_label(r) for r in runs]
 
         # Union of hyperparam keys across selected runs
         keys: list[str] = []

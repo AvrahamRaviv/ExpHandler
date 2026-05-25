@@ -11,6 +11,7 @@ from scanners.dvnr import scan_dvnr
 from scanners.dof import scan_dof
 from scanners.odt import scan_odt
 from scanners.vbp import scan_vbp
+from scanners.normnet import scan_normnet
 from screens.runs import RunsScreen
 from screens.plots import PlotsScreen
 from screens.monitor import MonitorScreen
@@ -19,7 +20,8 @@ from screens.vbp_wizard import VBPWizardScreen
 from ui import theme
 from ui.sidebar import Sidebar
 
-_SCANNERS = {"DVNR": scan_dvnr, "ODT": scan_odt, "VBP": scan_vbp, "DOF": scan_dof}
+_SCANNERS = {"DVNR": scan_dvnr, "ODT": scan_odt, "VBP": scan_vbp,
+             "DOF": scan_dof, "NORMNET": scan_normnet}
 _VBP_SUBTYPE_SUFFIX = "_TP"
 
 
@@ -30,7 +32,8 @@ class MainWindow(QMainWindow):
         self.resize(1400, 820)
 
         # Cache keyed by project name or "VBP/<subtype>"
-        self._loaded: dict[str, list | None] = {"DVNR": None, "ODT": None, "DOF": None}
+        self._loaded: dict[str, list | None] = {
+            "DVNR": None, "ODT": None, "DOF": None, "NORMNET": None}
         self._active_project: str | None = None
         self._active_vbp_subtype: str | None = None
 
