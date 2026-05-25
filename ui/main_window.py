@@ -24,6 +24,15 @@ _SCANNERS = {"DVNR": scan_dvnr, "ODT": scan_odt, "VBP": scan_vbp,
              "DOF": scan_dof, "NORMNET": scan_normnet}
 _VBP_SUBTYPE_SUFFIX = "_TP"
 
+# Projects that present a sub-type tab bar: one tab per top-level folder.
+#   VBP     — folders filtered by the _TP suffix; shows Launcher/Wizard tabs.
+#   NORMNET — every top-level folder is an arch family (no suffix filter),
+#             scanned recursively for its experiments; no launcher/wizard.
+_SUBTYPED = {
+    "VBP":     {"suffix": _VBP_SUBTYPE_SUFFIX, "scanner": scan_vbp,     "extra_tabs": True},
+    "NORMNET": {"suffix": None,                "scanner": scan_normnet, "extra_tabs": False},
+}
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -31,11 +40,10 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("ExpHandler")
         self.resize(1400, 820)
 
-        # Cache keyed by project name or "VBP/<subtype>"
-        self._loaded: dict[str, list | None] = {
-            "DVNR": None, "ODT": None, "DOF": None, "NORMNET": None}
+        # Cache keyed by project name or "<project>/<subtype>" (VBP, NORMNET)
+        self._loaded: dict[str, list | None] = {"DVNR": None, "ODT": None, "DOF": None}
         self._active_project: str | None = None
-        self._active_vbp_subtype: str | None = None
+        self._active_subtype: dict[str, str | None] = {}  # per subtyped project
 
         # ── Central layout ──────────────────────────────────────────
         central = QWidget()
@@ -106,8 +114,8 @@ class MainWindow(QMainWindow):
     # ── Project selection ────────────────────────────────────────────
     def _on_project_selected(self, project: str):
         self._active_project = project
-        if project == "VBP":
-            self._activate_vbp()
+        if project in _SUBTYPED:
+            self._activate_subtyped(project)
             return
 
         self._hide_subtype_bar()
@@ -132,9 +140,9 @@ class MainWindow(QMainWindow):
         save_project_path(project, root_path)
         self._active_project = project
         self.sidebar.set_active_silent(project)
-        if project == "VBP":
-            self._invalidate_vbp_cache()
-            self._activate_vbp()
+        if project in _SUBTYPED:
+            self._invalidate_subtype_cache(project)
+            self._activate_subtyped(project)
         else:
             self._hide_subtype_bar()
             self._loaded[project] = None
@@ -147,9 +155,9 @@ class MainWindow(QMainWindow):
         if not project:
             self.status.showMessage("Select a project first.")
             return
-        if project == "VBP":
-            self._invalidate_vbp_cache()
-            self._activate_vbp()
+        if project in _SUBTYPED:
+            self._invalidate_subtype_cache(project)
+            self._activate_subtyped(project)
             return
         root_path = get_project_path(project)
         if not root_path or not os.path.isdir(root_path):
@@ -158,29 +166,33 @@ class MainWindow(QMainWindow):
         self._scan(project, root_path)
         self._display(project)
 
-    # ── VBP multi-subtype handling ───────────────────────────────────
-    def _activate_vbp(self):
-        root_path = get_project_path("VBP")
-        # Migrate legacy config that saved a specific *_TP folder
-        if root_path and root_path.rstrip("/").endswith(_VBP_SUBTYPE_SUFFIX):
+    # ── Sub-typed projects (VBP / NORMNET): one tab per top-level folder ─
+    def _activate_subtyped(self, project: str):
+        cfg = _SUBTYPED[project]
+        root_path = get_project_path(project)
+
+        # Migrate legacy VBP config that saved a specific *_TP folder.
+        if (project == "VBP" and root_path
+                and root_path.rstrip("/").endswith(_VBP_SUBTYPE_SUFFIX)):
             parent = os.path.dirname(root_path.rstrip("/"))
             if os.path.isdir(parent):
                 root_path = parent
                 save_project_path("VBP", root_path)
 
         if not root_path or not os.path.isdir(root_path):
-            root_path = self._ask_for_path("VBP")
+            root_path = self._ask_for_path(project)
             if not root_path:
-                self.sidebar.set_active_silent("VBP")
+                self.sidebar.set_active_silent(project)
                 return
-            save_project_path("VBP", root_path)
+            save_project_path(project, root_path)
 
-        subtypes = self._discover_vbp_subtypes(root_path)
+        subtypes = self._discover_subtypes(project, root_path)
         if not subtypes:
             self._hide_subtype_bar()
+            what = f"*{cfg['suffix']} folders" if cfg["suffix"] else "sub-folders"
             QMessageBox.warning(
-                self, "No VBP experiments",
-                f"No *{_VBP_SUBTYPE_SUFFIX} folders under:\n{root_path}"
+                self, f"No {project} experiments",
+                f"No {what} under:\n{root_path}"
             )
             return
 
@@ -191,61 +203,67 @@ class MainWindow(QMainWindow):
             self.subtype_bar.addTab(s)
         self.subtype_bar.setVisible(True)
 
-        idx = subtypes.index(self._active_vbp_subtype) \
-            if self._active_vbp_subtype in subtypes else 0
+        cur = self._active_subtype.get(project)
+        idx = subtypes.index(cur) if cur in subtypes else 0
         self.subtype_bar.setCurrentIndex(idx)
         self.subtype_bar.blockSignals(False)
 
-        self._active_vbp_subtype = subtypes[idx]
-        self._load_vbp_subtype(root_path, subtypes[idx])
+        self._active_subtype[project] = subtypes[idx]
+        self._load_subtype(project, root_path, subtypes[idx])
 
     def _on_subtype_changed(self, idx: int):
-        if idx < 0 or self._active_project != "VBP":
+        project = self._active_project
+        if idx < 0 or project not in _SUBTYPED:
             return
         subtype = self.subtype_bar.tabText(idx)
-        root_path = get_project_path("VBP")
+        root_path = get_project_path(project)
         if not root_path:
             return
-        self._active_vbp_subtype = subtype
-        self._load_vbp_subtype(root_path, subtype)
+        self._active_subtype[project] = subtype
+        self._load_subtype(project, root_path, subtype)
 
-    def _load_vbp_subtype(self, root_path: str, subtype: str):
-        key = f"VBP/{subtype}"
+    def _load_subtype(self, project: str, root_path: str, subtype: str):
+        cfg = _SUBTYPED[project]
+        key = f"{project}/{subtype}"
         full_path = os.path.join(root_path, subtype)
         if self._loaded.get(key) is None:
             self.status.showMessage(f"Scanning {key}…")
             try:
-                self._loaded[key] = scan_vbp(full_path)
+                self._loaded[key] = cfg["scanner"](full_path)
             except Exception as e:
                 QMessageBox.warning(self, "Scan error", f"Could not scan {key}:\n{e}")
                 self._loaded[key] = []
 
         data = self._loaded.get(key) or []
-        self.runs_screen.load("VBP", data)
-        self.plots_screen.load("VBP", data)
-        self.monitor_screen.load("VBP", data)
-        self.launcher_screen.load(subtype, root_path)
-        self.tabs.setTabVisible(self._launcher_tab_idx, True)
-        self.tabs.setTabVisible(self._wizard_tab_idx, True)
+        self.runs_screen.load(project, data)
+        self.plots_screen.load(project, data)
+        self.monitor_screen.load(project, data)
+        if cfg["extra_tabs"]:
+            self.launcher_screen.load(subtype, root_path)
+        self.tabs.setTabVisible(self._launcher_tab_idx, cfg["extra_tabs"])
+        self.tabs.setTabVisible(self._wizard_tab_idx, cfg["extra_tabs"])
         n = len(data)
         self.status.showMessage(
             f"{key}  —  {n} experiment{'s' if n != 1 else ''} loaded  ({full_path})"
         )
 
-    def _discover_vbp_subtypes(self, root_path: str) -> list[str]:
+    def _discover_subtypes(self, project: str, root_path: str) -> list[str]:
+        suffix = _SUBTYPED[project]["suffix"]
         try:
             items = os.listdir(root_path)
         except OSError:
             return []
         return sorted(
             d for d in items
-            if d.endswith(_VBP_SUBTYPE_SUFFIX)
-            and os.path.isdir(os.path.join(root_path, d))
+            if os.path.isdir(os.path.join(root_path, d))
+            and not d.startswith(".")
+            and (suffix is None or d.endswith(suffix))
         )
 
-    def _invalidate_vbp_cache(self):
+    def _invalidate_subtype_cache(self, project: str):
+        prefix = f"{project}/"
         for k in list(self._loaded.keys()):
-            if k.startswith("VBP/"):
+            if k.startswith(prefix):
                 self._loaded[k] = None
 
     def _hide_subtype_bar(self):
