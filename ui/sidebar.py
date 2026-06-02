@@ -32,7 +32,7 @@ class Sidebar(QWidget):
         self.title.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.title)
 
-        self.version = QLabel("v0.2.12")
+        self.version = QLabel("v0.2.13")
         self.version.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.version)
 
