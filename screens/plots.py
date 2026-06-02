@@ -803,8 +803,23 @@ class PlotsScreen(QWidget):
                     continue
                 arm = exp.get("arm", "")
                 ls = "-" if arm == "normalized" else "--"
-                ax.plot(xs, ys, marker="o", markersize=3, linestyle=ls,
-                        label=f"{exp['name']} [{arm[:4]}]")
+                line, = ax.plot(xs, ys, marker="o", markersize=3, linestyle=ls,
+                                label=f"{exp['name']} [{arm[:4]}]")
+                # EMA overlay for val_acc — dashed/dotted line is the usual
+                # convention. Skipped silently when absent (prune runs / early
+                # epochs before EMA warm-up).
+                if metric == "val_acc":
+                    exs, eys = [], []
+                    for e in exp.get("epochs", []):
+                        ep, v = e.get("cum_epoch"), e.get("ema_val_acc")
+                        if ep is None or v is None:
+                            continue
+                        exs.append(ep)
+                        eys.append(v)
+                    if exs:
+                        ax.plot(exs, eys, linestyle=":", linewidth=1.4,
+                                color=line.get_color(),
+                                label=f"{exp['name']} [{arm[:4]}] EMA")
             if metric == "lr":
                 ax.set_yscale("log")
             ax.set_ylabel(metric)
@@ -852,6 +867,15 @@ class PlotsScreen(QWidget):
                     color=color, label=f"{lbl} norm")
             ax.plot(bxs, [y * 100 for y in bys], marker="s", markersize=3,
                     linestyle="--", color=color, label=f"{lbl} base")
+            # EMA overlays (dotted) when present — same color, no marker.
+            nxe, nye = _xy(norm["epochs"], "ema_val_acc")
+            bxe, bye = _xy(base["epochs"], "ema_val_acc")
+            if nxe:
+                ax.plot(nxe, [y * 100 for y in nye], linestyle=":",
+                        linewidth=1.4, color=color, label=f"{lbl} norm EMA")
+            if bxe:
+                ax.plot(bxe, [y * 100 for y in bye], linestyle=":",
+                        linewidth=1.4, color=color, label=f"{lbl} base EMA")
             bmap = dict(zip(bxs, bys))
             dxs, dys = [], []
             for ep, y in zip(nxs, nys):
