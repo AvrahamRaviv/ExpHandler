@@ -813,29 +813,33 @@ class PlotsScreen(QWidget):
                         ys.append(v)
                     return xs, ys
 
-                # For non-val_acc metrics there is no EMA; the mode is ignored.
-                show_raw = metric != "val_acc" or mode in ("both", "raw")
-                show_ema = metric == "val_acc" and mode in ("both", "ema")
+                rxs, rys = _xy(metric)
+                # EMA only applies to val_acc.
+                exs, eys = _xy("ema_val_acc") if metric == "val_acc" else ([], [])
+                has_ema = bool(exs)
+
+                if metric != "val_acc" or mode == "raw":
+                    show_raw, show_ema = bool(rxs), False
+                elif mode == "both":
+                    show_raw, show_ema = bool(rxs), has_ema
+                else:                       # ema-only: fall back to raw when EMA absent
+                    show_raw, show_ema = (not has_ema and bool(rxs)), has_ema
 
                 color = None
                 if show_raw:
-                    xs, ys = _xy(metric)
-                    if xs:
-                        line, = ax.plot(xs, ys, marker="o", markersize=3,
-                                        linestyle=ls,
-                                        label=f"{exp['name']} [{arm[:4]}]")
-                        color = line.get_color()
+                    line, = ax.plot(rxs, rys, marker="o", markersize=3,
+                                    linestyle=ls,
+                                    label=f"{exp['name']} [{arm[:4]}]")
+                    color = line.get_color()
                 if show_ema:
-                    exs, eys = _xy("ema_val_acc")
-                    if exs:
-                        # Dotted when shown alongside raw; solid + marker when
-                        # EMA is the sole line (treated as canonical).
-                        ema_kwargs = (dict(linestyle=":", linewidth=1.4)
-                                      if show_raw
-                                      else dict(linestyle=ls, marker="o",
-                                                markersize=3))
-                        ax.plot(exs, eys, color=color, **ema_kwargs,
-                                label=f"{exp['name']} [{arm[:4]}] EMA")
+                    # Dotted when overlaid on raw; solid + marker when EMA is
+                    # the sole line for this run (treated as canonical).
+                    ema_kwargs = (dict(linestyle=":", linewidth=1.4)
+                                  if show_raw
+                                  else dict(linestyle=ls, marker="o",
+                                            markersize=3))
+                    ax.plot(exs, eys, color=color, **ema_kwargs,
+                            label=f"{exp['name']} [{arm[:4]}] EMA")
             if metric == "lr":
                 ax.set_yscale("log")
             ax.set_ylabel(metric)
@@ -878,33 +882,44 @@ class PlotsScreen(QWidget):
             norm, base = p["normalized"], p["baseline"]
             lbl = p["label"]
             mode = self.nn_acc_mode.currentData()
-            show_raw = mode in ("both", "raw")
-            show_ema = mode in ("both", "ema")
             nxs, nys = _xy(norm["epochs"])
             bxs, bys = _xy(base["epochs"])
             nxe, nye = _xy(norm["epochs"], "ema_val_acc")
             bxe, bye = _xy(base["epochs"], "ema_val_acc")
+            has_n, has_b = bool(nxe), bool(bxe)
 
-            if show_raw:
+            # Per-arm raw/EMA gating: in EMA-only mode, fall back to raw for
+            # an arm that has no EMA data (e.g. a prune-style baseline).
+            if mode == "raw":
+                show_n_raw = show_b_raw = True
+                show_n_ema = show_b_ema = False
+            elif mode == "both":
+                show_n_raw = show_b_raw = True
+                show_n_ema, show_b_ema = has_n, has_b
+            else:
+                show_n_raw, show_n_ema = (not has_n), has_n
+                show_b_raw, show_b_ema = (not has_b), has_b
+
+            if show_n_raw:
                 ax.plot(nxs, [y * 100 for y in nys], marker="o", markersize=3,
                         color=color, label=f"{lbl} norm")
+            if show_b_raw:
                 ax.plot(bxs, [y * 100 for y in bys], marker="s", markersize=3,
                         linestyle="--", color=color, label=f"{lbl} base")
-            if show_ema:
-                # Dotted when overlaid on raw; solid + marker when alone.
-                norm_kw = (dict(linestyle=":", linewidth=1.4) if show_raw
-                           else dict(marker="o", markersize=3))
-                base_kw = (dict(linestyle=":", linewidth=1.4) if show_raw
-                           else dict(marker="s", markersize=3, linestyle="--"))
-                if nxe:
-                    ax.plot(nxe, [y * 100 for y in nye], color=color,
-                            label=f"{lbl} norm EMA", **norm_kw)
-                if bxe:
-                    ax.plot(bxe, [y * 100 for y in bye], color=color,
-                            label=f"{lbl} base EMA", **base_kw)
+            if show_n_ema:
+                kw = (dict(linestyle=":", linewidth=1.4) if show_n_raw
+                      else dict(marker="o", markersize=3))
+                ax.plot(nxe, [y * 100 for y in nye], color=color,
+                        label=f"{lbl} norm EMA", **kw)
+            if show_b_ema:
+                kw = (dict(linestyle=":", linewidth=1.4) if show_b_raw
+                      else dict(marker="s", markersize=3, linestyle="--"))
+                ax.plot(bxe, [y * 100 for y in bye], color=color,
+                        label=f"{lbl} base EMA", **kw)
 
-            # Δ subplot tracks the same signal: EMA when only EMA shown, else raw.
-            if mode == "ema":
+            # Δ subplot — use EMA only when EMA-only mode AND both arms have
+            # EMA; otherwise raw, to keep the comparison apples-to-apples.
+            if mode == "ema" and has_n and has_b:
                 d_nx, d_ny, d_bx, d_by = nxe, nye, bxe, bye
             else:
                 d_nx, d_ny, d_bx, d_by = nxs, nys, bxs, bys
