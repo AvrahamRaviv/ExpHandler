@@ -194,7 +194,12 @@ def _build_record(root: str, save_dir: str, tag: str, log_cache: dict) -> dict |
     epochs = _read_jsonl(os.path.join(save_dir, tag + _METRICS_SUFFIX))
     if run_json is None and not epochs:
         return None
-    epochs = sorted(epochs, key=lambda e: e.get("epoch", 0))
+    # Drop malformed rows (e.g. partial line during a live write) so the
+    # downstream plots/details never have to defend against missing "epoch".
+    epochs = sorted(
+        (e for e in epochs if isinstance(e.get("epoch"), int)),
+        key=lambda e: e["epoch"],
+    )
 
     config = (run_json or {}).get("config") or {}
     # Arm: run.json wins, else metrics, else infer from config.

@@ -792,9 +792,13 @@ class PlotsScreen(QWidget):
         for mi, metric in enumerate(metrics):
             ax = self.figure.add_subplot(n, 1, mi + 1)
             for exp in runs:
-                eps = exp.get("epochs", [])
-                xs = [e["epoch"] for e in eps if e.get(metric) is not None]
-                ys = [e[metric] for e in eps if e.get(metric) is not None]
+                xs, ys = [], []
+                for e in exp.get("epochs", []):
+                    ep, v = e.get("epoch"), e.get(metric)
+                    if ep is None or v is None:
+                        continue
+                    xs.append(ep)
+                    ys.append(v)
                 if not xs:
                     continue
                 arm = exp.get("arm", "")
@@ -828,21 +832,32 @@ class PlotsScreen(QWidget):
         ax = self.figure.add_subplot(2, 1, 1)
         ax2 = self.figure.add_subplot(2, 1, 2)
         cmap = mcm.get_cmap("tab10")
+        def _xy(epochs, metric="val_acc"):
+            xs, ys = [], []
+            for e in epochs:
+                ep, v = e.get("epoch"), e.get(metric)
+                if ep is None or v is None:
+                    continue
+                xs.append(ep)
+                ys.append(v)
+            return xs, ys
+
         for i, p in enumerate(pairs):
             color = cmap(i % 10)
             norm, base = p["normalized"], p["baseline"]
             lbl = p["label"]
-            ax.plot([e["epoch"] for e in norm["epochs"]],
-                    [e["val_acc"] * 100 for e in norm["epochs"]],
-                    marker="o", markersize=3, color=color, label=f"{lbl} norm")
-            ax.plot([e["epoch"] for e in base["epochs"]],
-                    [e["val_acc"] * 100 for e in base["epochs"]],
-                    marker="s", markersize=3, linestyle="--", color=color,
-                    label=f"{lbl} base")
-            bmap = {e["epoch"]: e["val_acc"] for e in base["epochs"]}
-            dxs = [e["epoch"] for e in norm["epochs"] if e["epoch"] in bmap]
-            dys = [(e["val_acc"] - bmap[e["epoch"]]) * 100
-                   for e in norm["epochs"] if e["epoch"] in bmap]
+            nxs, nys = _xy(norm["epochs"])
+            bxs, bys = _xy(base["epochs"])
+            ax.plot(nxs, [y * 100 for y in nys], marker="o", markersize=3,
+                    color=color, label=f"{lbl} norm")
+            ax.plot(bxs, [y * 100 for y in bys], marker="s", markersize=3,
+                    linestyle="--", color=color, label=f"{lbl} base")
+            bmap = dict(zip(bxs, bys))
+            dxs, dys = [], []
+            for ep, y in zip(nxs, nys):
+                if ep in bmap:
+                    dxs.append(ep)
+                    dys.append((y - bmap[ep]) * 100)
             ax2.plot(dxs, dys, marker="o", markersize=3, color=color, label=lbl)
 
         ax.set_ylabel("Val acc (%)")
