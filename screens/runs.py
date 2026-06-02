@@ -26,6 +26,13 @@ def _fmt(v) -> str:
     return str(v)
 
 
+def _coalesce(*vals):
+    for v in vals:
+        if v is not None:
+            return v
+    return None
+
+
 def _run_label(r: dict) -> str:
     """Column header for a run in the compare table (VBP or NORMNET)."""
     if "setup" in r:
@@ -214,18 +221,31 @@ class RunsScreen(QWidget):
 
     def _load_normnet(self, data: list):
         # One row per run; Δ best = normalized − baseline shown on each paired
-        # row (same value both arms). Pairs join on matched config.
-        headers = ["Run", "Arm", "Status", "Model", "Epochs", "LR", "WD",
-                   "Pre-acc", "Best Acc", "Δ best (pair)", "MACs (G)", "Params (M)"]
+        # row (same value both arms). Pairs join on matched config. Epochs
+        # split into Sparse (pre-FT phases) and FT (recovery / final phase) so
+        # multi-phase runs (e.g. normnet_main: train → norm_ft → prune → ft)
+        # don't hide their structure under a single count.
+        headers = ["Run", "Arm", "Status", "Model",
+                   "Sparse ep", "FT ep",
+                   "LR", "WD",
+                   "Pre-acc", "Pre-FT acc", "Best Acc",
+                   "Δ best (pair)", "MACs (G)", "Params (M)"]
         self._set_columns(headers)
         for i, exp in enumerate(data):
             cfg = exp.get("config") or {}
             model = cfg.get("cnn_arch") or cfg.get("model_name", "")
-            ep = f"{exp.get('n_epochs', 0)}/{exp.get('target_epochs') or '?'}"
+            lr = _coalesce(cfg.get("lr"), cfg.get("lr_ft"))
+            tgt = exp.get("target_epochs")
+            ft_cell = (f"{exp.get('ft_epochs', 0)}/{tgt}" if tgt
+                       else exp.get("ft_epochs", 0))
             row = [
                 exp.get("name", ""), exp.get("arm", ""), exp.get("status", ""),
-                model, ep, cfg.get("lr"), cfg.get("wd"),
-                exp.get("pre_train_val_acc"), exp.get("best_val_acc"),
+                model,
+                exp.get("sparse_epochs", 0), ft_cell,
+                lr, cfg.get("wd"),
+                exp.get("pre_train_val_acc"),
+                exp.get("pre_ft_val_acc"),
+                exp.get("best_val_acc"),
                 exp.get("paired_delta_best"),
                 exp.get("macs_g"), exp.get("params_m"),
             ]
@@ -315,9 +335,18 @@ class RunsScreen(QWidget):
                 lines.append(f"Δ best_val_acc (norm − base): {dlt:+.4f}")
             lines.append("")
             lines.append("── Summary ──")
-            for k in ("pre_train_val_acc", "best_val_acc", "macs_g", "params_m",
-                      "n_epochs", "target_epochs"):
+            for k in ("pre_train_val_acc", "pre_ft_val_acc", "best_val_acc",
+                      "macs_g", "params_m",
+                      "sparse_epochs", "ft_epochs", "target_epochs"):
                 lines.append(f"  {k:<40} {_fmt(exp.get(k))}")
+            prune = exp.get("prune") or {}
+            if prune:
+                lines.append("")
+                lines.append("── Prune ──")
+                for k in ("scorer", "target", "global_ratio", "global_kept_pct",
+                          "macs_g", "macs_pct", "params_m", "pre_ft_val_acc"):
+                    if k in prune:
+                        lines.append(f"  {k:<40} {_fmt(prune.get(k))}")
             lines.append("")
             lines.append("── Checkpoints ──")
             ckpts = exp.get("checkpoints") or {}

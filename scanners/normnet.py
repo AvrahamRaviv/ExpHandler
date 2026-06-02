@@ -42,6 +42,7 @@ _CMD_RE = re.compile(r"command:\s*(.*)$", re.MULTILINE)
 
 _RUN_SUFFIX = "_run.json"
 _METRICS_SUFFIX = "_metrics.jsonl"
+_PRUNE_SUFFIX = "_prune.json"
 _LOG_NAME = "vbp_imagenet.log"
 
 
@@ -55,6 +56,14 @@ def _read_json(path: str):
             return json.load(f)
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def _coalesce(*vals):
+    """First non-None value (handles new-vs-old schema field name drift)."""
+    for v in vals:
+        if v is not None:
+            return v
+    return None
 
 
 def _read_jsonl(path: str) -> list:
@@ -128,7 +137,13 @@ def pair_runs(records: list) -> list:
     order: list = []
     for r in records:
         cfg = r.get("config")
-        key = _pair_signature(cfg) if cfg else ("__solo__", r["run_id"])
+        # Only normalized/baseline arms participate in pairing. Pipeline runs
+        # (normnet_main.py, no baseline-arm concept) stay solo even when their
+        # configs match by chance.
+        if r["arm"] not in ("normalized", "baseline") or not cfg:
+            key = ("__solo__", r["run_id"])
+        else:
+            key = _pair_signature(cfg)
         if key not in groups:
             groups[key] = {"normalized": None, "baseline": None, "runs": []}
             order.append(key)
@@ -192,13 +207,19 @@ def _best_val_acc(run_json: dict, epochs: list):
 def _build_record(root: str, save_dir: str, tag: str, log_cache: dict) -> dict | None:
     run_json = _read_json(os.path.join(save_dir, tag + _RUN_SUFFIX))
     epochs = _read_jsonl(os.path.join(save_dir, tag + _METRICS_SUFFIX))
-    if run_json is None and not epochs:
+    # New pipeline (normnet_main.py) writes a dedicated <tag>_prune.json with
+    # the post-prune (pre-FT) accuracy + per-layer pruning ratios. Old runs
+    # don't have it; missing file = None and the chain falls back to run.json.
+    prune_json = _read_json(os.path.join(save_dir, tag + _PRUNE_SUFFIX))
+    if run_json is None and prune_json is None and not epochs:
         return None
-    # Synthetic pre-FT row (analog of VBP's retention point). The normalized
-    # arm writes its own epoch=0 row at post_reparam_init. The baseline arm
-    # doesn't, so fill in from run.json pre_train_val_acc when no epoch=0 row
-    # exists, so plots can always mark the "before any training" reference.
-    pre_ft = (run_json or {}).get("pre_train_val_acc")
+    # Synthetic pre-FT row (analog of VBP's retention point). Source priority:
+    # the prune.json post-prune accuracy (= true pre-FT in the prune pipeline),
+    # then the dense-pipeline pre_train_val_acc. The normalized arm writes its
+    # own epoch=0 row at post_reparam_init; we only synthesize when no such
+    # row exists, so plots can always mark the "before any training" reference.
+    pre_ft = _coalesce((prune_json or {}).get("pre_ft_val_acc"),
+                       (run_json or {}).get("pre_train_val_acc"))
     has_zero = any(isinstance(e.get("epoch"), int) and e["epoch"] == 0
                    for e in epochs)
     if pre_ft is not None and not has_zero:
@@ -226,12 +247,17 @@ def _build_record(root: str, save_dir: str, tag: str, log_cache: dict) -> dict |
     epochs = annotated
 
     config = (run_json or {}).get("config") or {}
-    # Arm: run.json wins, else metrics, else infer from config.
+    # Arm: run.json wins, else metrics, else infer from config. normnet_main
+    # has no baseline-arm concept (unified train→norm→prune→ft pipeline) and
+    # no no_reparam flag, so it falls through to "pipeline" → solo (no pair).
     arm = (run_json or {}).get("arm")
     if not arm and epochs:
         arm = epochs[0].get("arm")
     if not arm:
-        arm = "baseline" if config.get("no_reparam") else "normalized"
+        if "no_reparam" in config:
+            arm = "baseline" if config["no_reparam"] else "normalized"
+        else:
+            arm = "pipeline"
 
     status = (run_json or {}).get("status") or ("running" if epochs else "unknown")
 
@@ -251,10 +277,27 @@ def _build_record(root: str, save_dir: str, tag: str, log_cache: dict) -> dict |
     rel = os.path.relpath(save_dir, root)
     name = tag if rel in (".", "") else f"{rel}/{tag}"
 
-    target_epochs = (run_json or {}).get("config", {}).get("epochs")
-    if target_epochs is None and epochs:
-        target_epochs = epochs[-1].get("epochs")
+    # target_epochs: old --epochs, else new --epochs_ft, else last jsonl row.
+    target_epochs = _coalesce(config.get("epochs"), config.get("epochs_ft"),
+                              epochs[-1].get("epochs") if epochs else None)
 
+    # Per-phase counts. Skip the synthetic / post_reparam_init row at epoch=0
+    # so it doesn't pad the "sparse" bucket. Heuristic: last phase = FT
+    # (recovery), prior phases = sparse / pre-FT training.
+    training = [e for e in epochs if e.get("epoch", -1) >= 1]
+    if not training:
+        sparse_epochs = ft_epochs = 0
+    else:
+        max_ph = max(e["phase_idx"] for e in training)
+        sparse_epochs = sum(1 for e in training if e["phase_idx"] < max_ph)
+        ft_epochs = sum(1 for e in training if e["phase_idx"] == max_ph)
+
+    # checkpoints: dict form (old) or single "checkpoint" path string (new).
+    ckpts = (run_json or {}).get("checkpoints") or {}
+    if not ckpts and (run_json or {}).get("checkpoint"):
+        ckpts = {"final": run_json["checkpoint"]}
+
+    rj = run_json or {}
     return {
         "run_id": os.path.join(save_dir, tag),
         "save_dir": save_dir,
@@ -264,15 +307,25 @@ def _build_record(root: str, save_dir: str, tag: str, log_cache: dict) -> dict |
         "status": status,
         "config": config,
         "hyperparams": config,            # alias → reuse Runs compare table
-        "pre_train_val_acc": (run_json or {}).get("pre_train_val_acc"),
-        "best_val_acc": _best_val_acc(run_json, epochs),
-        "macs_g": (run_json or {}).get("macs_g"),
-        "params_m": (run_json or {}).get("params_m"),
-        "checkpoints": (run_json or {}).get("checkpoints") or {},
-        "metrics_file": (run_json or {}).get("metrics_file")
+        # Two distinct references. Plots' X-marker prefers pre_ft_val_acc
+        # when present (true post-prune pre-FT), otherwise pre_train_val_acc.
+        "pre_train_val_acc": rj.get("pre_train_val_acc"),
+        "pre_ft_val_acc": (prune_json or {}).get("pre_ft_val_acc"),
+        "best_val_acc": _coalesce(rj.get("best_val_acc"),
+                                  rj.get("best_ft_val_acc"),
+                                  _best_val_acc(run_json, epochs)),
+        "macs_g": _coalesce(rj.get("macs_g"), rj.get("final_macs_g"),
+                            rj.get("dense_macs_g")),
+        "params_m": _coalesce(rj.get("params_m"), rj.get("final_params_m"),
+                              rj.get("dense_params_m")),
+        "checkpoints": ckpts,
+        "prune": prune_json,              # full <tag>_prune.json content (or None)
+        "metrics_file": rj.get("metrics_file")
         or os.path.join(save_dir, tag + _METRICS_SUFFIX),
         "epochs": epochs,                 # list of per-epoch metric dicts
         "n_epochs": len(epochs),
+        "sparse_epochs": sparse_epochs,
+        "ft_epochs": ft_epochs,
         "target_epochs": target_epochs,
         "vnorm": vnorm,
         "command": _command_for_arm(cmds, arm),
@@ -295,6 +348,8 @@ def scan_normnet(root_dir: str) -> list:
                 tags.add(fn[: -len(_RUN_SUFFIX)])
             elif fn.endswith(_METRICS_SUFFIX):
                 tags.add(fn[: -len(_METRICS_SUFFIX)])
+            elif fn.endswith(_PRUNE_SUFFIX):
+                tags.add(fn[: -len(_PRUNE_SUFFIX)])
         for tag in sorted(tags):
             rec = _build_record(root_dir, save_dir, tag, log_cache)
             if rec is not None:
