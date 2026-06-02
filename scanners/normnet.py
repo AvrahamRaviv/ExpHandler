@@ -194,12 +194,26 @@ def _build_record(root: str, save_dir: str, tag: str, log_cache: dict) -> dict |
     epochs = _read_jsonl(os.path.join(save_dir, tag + _METRICS_SUFFIX))
     if run_json is None and not epochs:
         return None
-    # Drop malformed rows (e.g. partial line during a live write) so the
-    # downstream plots/details never have to defend against missing "epoch".
-    epochs = sorted(
-        (e for e in epochs if isinstance(e.get("epoch"), int)),
-        key=lambda e: e["epoch"],
-    )
+    # Preserve file (append) order and tag each row with a cumulative epoch
+    # index. A reset (epoch <= previous epoch) marks a new training phase
+    # (e.g. sparse → FT) so the GUI can plot on a continuous x-axis without
+    # the two phases overlapping at epochs 1..5. Drop malformed rows lacking
+    # an integer "epoch" — guards against partial jsonl writes.
+    annotated = []
+    last_ep, last_cum, phase_idx, offset = -1, 0, 0, 0
+    for e in epochs:
+        ep = e.get("epoch")
+        if not isinstance(ep, int):
+            continue
+        if ep <= last_ep:
+            phase_idx += 1
+            offset = last_cum
+        cum = ep + offset
+        e["phase_idx"] = phase_idx
+        e["cum_epoch"] = cum
+        annotated.append(e)
+        last_ep, last_cum = ep, cum
+    epochs = annotated
 
     config = (run_json or {}).get("config") or {}
     # Arm: run.json wins, else metrics, else infer from config.

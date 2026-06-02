@@ -794,7 +794,7 @@ class PlotsScreen(QWidget):
             for exp in runs:
                 xs, ys = [], []
                 for e in exp.get("epochs", []):
-                    ep, v = e.get("epoch"), e.get(metric)
+                    ep, v = e.get("cum_epoch"), e.get(metric)
                     if ep is None or v is None:
                         continue
                     xs.append(ep)
@@ -810,7 +810,7 @@ class PlotsScreen(QWidget):
             ax.set_ylabel(metric)
             ax.grid(True, alpha=0.3)
             if mi == n - 1:
-                ax.set_xlabel("Epoch")
+                ax.set_xlabel("Cumulative epoch (phases concatenated)")
             if mi == 0:
                 ax.set_title("NORMNET — per-run curves (— normalized, -- baseline)")
                 ax.legend(**self._legend_kwargs(len(runs)))
@@ -835,7 +835,7 @@ class PlotsScreen(QWidget):
         def _xy(epochs, metric="val_acc"):
             xs, ys = [], []
             for e in epochs:
-                ep, v = e.get("epoch"), e.get(metric)
+                ep, v = e.get("cum_epoch"), e.get(metric)
                 if ep is None or v is None:
                     continue
                 xs.append(ep)
@@ -866,7 +866,7 @@ class PlotsScreen(QWidget):
         ax.legend(**self._legend_kwargs(len(pairs) * 2, base=7.0))
 
         ax2.axhline(0, color="gray", linewidth=0.8)
-        ax2.set_xlabel("Epoch")
+        ax2.set_xlabel("Cumulative epoch (phases concatenated)")
         ax2.set_ylabel("Δ val_acc (pp)")
         ax2.grid(True, alpha=0.3)
         dbest = ", ".join(
