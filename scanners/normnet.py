@@ -194,6 +194,16 @@ def _build_record(root: str, save_dir: str, tag: str, log_cache: dict) -> dict |
     epochs = _read_jsonl(os.path.join(save_dir, tag + _METRICS_SUFFIX))
     if run_json is None and not epochs:
         return None
+    # Synthetic pre-FT row (analog of VBP's retention point). The normalized
+    # arm writes its own epoch=0 row at post_reparam_init. The baseline arm
+    # doesn't, so fill in from run.json pre_train_val_acc when no epoch=0 row
+    # exists, so plots can always mark the "before any training" reference.
+    pre_ft = (run_json or {}).get("pre_train_val_acc")
+    has_zero = any(isinstance(e.get("epoch"), int) and e["epoch"] == 0
+                   for e in epochs)
+    if pre_ft is not None and not has_zero:
+        epochs = [{"epoch": 0, "val_acc": pre_ft, "stage": "pre_ft"}] + epochs
+
     # Preserve file (append) order and tag each row with a cumulative epoch
     # index. A reset (epoch <= previous epoch) marks a new training phase
     # (e.g. sparse → FT) so the GUI can plot on a continuous x-axis without

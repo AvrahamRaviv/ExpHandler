@@ -818,6 +818,20 @@ class PlotsScreen(QWidget):
                 exs, eys = _xy("ema_val_acc") if metric == "val_acc" else ([], [])
                 has_ema = bool(exs)
 
+                # For val_acc, split off the cum_epoch=0 point as a distinct
+                # "pre-FT" marker (VBP retention analog). Training line then
+                # starts from cum_epoch>=1 instead of dipping through the X.
+                pre_ft = None
+                if metric == "val_acc":
+                    rxs_t, rys_t = [], []
+                    for ep, y in zip(rxs, rys):
+                        if ep == 0:
+                            pre_ft = y
+                        else:
+                            rxs_t.append(ep)
+                            rys_t.append(y)
+                    rxs, rys = rxs_t, rys_t
+
                 if metric != "val_acc" or mode == "raw":
                     show_raw, show_ema = bool(rxs), False
                 elif mode == "both":
@@ -838,8 +852,15 @@ class PlotsScreen(QWidget):
                                   if show_raw
                                   else dict(linestyle=ls, marker="o",
                                             markersize=3))
-                    ax.plot(exs, eys, color=color, **ema_kwargs,
-                            label=f"{exp['name']} [{arm[:4]}] EMA")
+                    eline, = ax.plot(exs, eys, color=color, **ema_kwargs,
+                                     label=f"{exp['name']} [{arm[:4]}] EMA")
+                    if color is None:
+                        color = eline.get_color()
+                # Pre-FT marker — shown regardless of mode (it's the reference
+                # point at "before any training"). Always uses raw val_acc.
+                if pre_ft is not None:
+                    ax.scatter([0], [pre_ft], marker="x", s=60, zorder=5,
+                               color=color)
             if metric == "lr":
                 ax.set_yscale("log")
             ax.set_ylabel(metric)
@@ -847,7 +868,8 @@ class PlotsScreen(QWidget):
             if mi == n - 1:
                 ax.set_xlabel("Cumulative epoch (phases concatenated)")
             if mi == 0:
-                ax.set_title("NORMNET — per-run curves (— normalized, -- baseline)")
+                ax.set_title("NORMNET — per-run curves "
+                             "(— normalized, -- baseline, × = pre-FT)")
                 ax.legend(**self._legend_kwargs(len(runs)))
 
     def _plot_normnet_pairs(self):
@@ -884,6 +906,22 @@ class PlotsScreen(QWidget):
             mode = self.nn_acc_mode.currentData()
             nxs, nys = _xy(norm["epochs"])
             bxs, bys = _xy(base["epochs"])
+
+            # Split off the cum_epoch=0 pre-FT point so the training line
+            # starts at cum_epoch>=1 and we can mark pre-FT as a distinct X.
+            def _split(xs, ys):
+                pre = None
+                xs2, ys2 = [], []
+                for ep, y in zip(xs, ys):
+                    if ep == 0:
+                        pre = y
+                    else:
+                        xs2.append(ep)
+                        ys2.append(y)
+                return xs2, ys2, pre
+
+            nxs, nys, n_pre = _split(nxs, nys)
+            bxs, bys, b_pre = _split(bxs, bys)
             nxe, nye = _xy(norm["epochs"], "ema_val_acc")
             bxe, bye = _xy(base["epochs"], "ema_val_acc")
             has_n, has_b = bool(nxe), bool(bxe)
@@ -917,6 +955,14 @@ class PlotsScreen(QWidget):
                 ax.plot(bxe, [y * 100 for y in bye], color=color,
                         label=f"{lbl} base EMA", **kw)
 
+            # Pre-FT markers (VBP retention analog) — shown regardless of mode.
+            if n_pre is not None:
+                ax.scatter([0], [n_pre * 100], marker="x", s=60, zorder=5,
+                           color=color)
+            if b_pre is not None:
+                ax.scatter([0], [b_pre * 100], marker="x", s=60, zorder=5,
+                           color=color)
+
             # Δ subplot — use EMA only when EMA-only mode AND both arms have
             # EMA; otherwise raw, to keep the comparison apples-to-apples.
             if mode == "ema" and has_n and has_b:
@@ -932,7 +978,7 @@ class PlotsScreen(QWidget):
             ax2.plot(dxs, dys, marker="o", markersize=3, color=color, label=lbl)
 
         ax.set_ylabel("Val acc (%)")
-        ax.set_title("NORMNET — val_acc: normalized vs baseline")
+        ax.set_title("NORMNET — val_acc: normalized vs baseline  (× = pre-FT)")
         ax.grid(True, alpha=0.3)
         ax.legend(**self._legend_kwargs(len(pairs) * 2, base=7.0))
 
