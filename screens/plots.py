@@ -76,6 +76,13 @@ class PlotsScreen(QWidget):
         self.nn_plot_type.addItem("V-norm health", "vnorm")
         self.nn_plot_type.currentIndexChanged.connect(self._on_nn_plot_type_changed)
         nn_pt_layout.addWidget(self.nn_plot_type)
+        # Raw vs EMA toggle (val_acc only carries an EMA; ignored for other metrics).
+        self.nn_acc_mode = QComboBox()
+        self.nn_acc_mode.addItem("Both raw + EMA", "both")
+        self.nn_acc_mode.addItem("Raw only", "raw")
+        self.nn_acc_mode.addItem("EMA only", "ema")
+        self.nn_acc_mode.currentIndexChanged.connect(self._update_plot)
+        nn_pt_layout.addWidget(self.nn_acc_mode)
         selector_layout.addWidget(self.nn_plot_type_box)
 
         # Loss key selector (DVNR only)
@@ -789,36 +796,45 @@ class PlotsScreen(QWidget):
             self._empty("Select runs and metrics")
             return
         n = len(metrics)
+        mode = self.nn_acc_mode.currentData()
         for mi, metric in enumerate(metrics):
             ax = self.figure.add_subplot(n, 1, mi + 1)
             for exp in runs:
-                xs, ys = [], []
-                for e in exp.get("epochs", []):
-                    ep, v = e.get("cum_epoch"), e.get(metric)
-                    if ep is None or v is None:
-                        continue
-                    xs.append(ep)
-                    ys.append(v)
-                if not xs:
-                    continue
                 arm = exp.get("arm", "")
                 ls = "-" if arm == "normalized" else "--"
-                line, = ax.plot(xs, ys, marker="o", markersize=3, linestyle=ls,
-                                label=f"{exp['name']} [{arm[:4]}]")
-                # EMA overlay for val_acc — dashed/dotted line is the usual
-                # convention. Skipped silently when absent (prune runs / early
-                # epochs before EMA warm-up).
-                if metric == "val_acc":
-                    exs, eys = [], []
+
+                def _xy(field):
+                    xs, ys = [], []
                     for e in exp.get("epochs", []):
-                        ep, v = e.get("cum_epoch"), e.get("ema_val_acc")
+                        ep, v = e.get("cum_epoch"), e.get(field)
                         if ep is None or v is None:
                             continue
-                        exs.append(ep)
-                        eys.append(v)
+                        xs.append(ep)
+                        ys.append(v)
+                    return xs, ys
+
+                # For non-val_acc metrics there is no EMA; the mode is ignored.
+                show_raw = metric != "val_acc" or mode in ("both", "raw")
+                show_ema = metric == "val_acc" and mode in ("both", "ema")
+
+                color = None
+                if show_raw:
+                    xs, ys = _xy(metric)
+                    if xs:
+                        line, = ax.plot(xs, ys, marker="o", markersize=3,
+                                        linestyle=ls,
+                                        label=f"{exp['name']} [{arm[:4]}]")
+                        color = line.get_color()
+                if show_ema:
+                    exs, eys = _xy("ema_val_acc")
                     if exs:
-                        ax.plot(exs, eys, linestyle=":", linewidth=1.4,
-                                color=line.get_color(),
+                        # Dotted when shown alongside raw; solid + marker when
+                        # EMA is the sole line (treated as canonical).
+                        ema_kwargs = (dict(linestyle=":", linewidth=1.4)
+                                      if show_raw
+                                      else dict(linestyle=ls, marker="o",
+                                                markersize=3))
+                        ax.plot(exs, eys, color=color, **ema_kwargs,
                                 label=f"{exp['name']} [{arm[:4]}] EMA")
             if metric == "lr":
                 ax.set_yscale("log")
@@ -861,24 +877,40 @@ class PlotsScreen(QWidget):
             color = cmap(i % 10)
             norm, base = p["normalized"], p["baseline"]
             lbl = p["label"]
+            mode = self.nn_acc_mode.currentData()
+            show_raw = mode in ("both", "raw")
+            show_ema = mode in ("both", "ema")
             nxs, nys = _xy(norm["epochs"])
             bxs, bys = _xy(base["epochs"])
-            ax.plot(nxs, [y * 100 for y in nys], marker="o", markersize=3,
-                    color=color, label=f"{lbl} norm")
-            ax.plot(bxs, [y * 100 for y in bys], marker="s", markersize=3,
-                    linestyle="--", color=color, label=f"{lbl} base")
-            # EMA overlays (dotted) when present — same color, no marker.
             nxe, nye = _xy(norm["epochs"], "ema_val_acc")
             bxe, bye = _xy(base["epochs"], "ema_val_acc")
-            if nxe:
-                ax.plot(nxe, [y * 100 for y in nye], linestyle=":",
-                        linewidth=1.4, color=color, label=f"{lbl} norm EMA")
-            if bxe:
-                ax.plot(bxe, [y * 100 for y in bye], linestyle=":",
-                        linewidth=1.4, color=color, label=f"{lbl} base EMA")
-            bmap = dict(zip(bxs, bys))
+
+            if show_raw:
+                ax.plot(nxs, [y * 100 for y in nys], marker="o", markersize=3,
+                        color=color, label=f"{lbl} norm")
+                ax.plot(bxs, [y * 100 for y in bys], marker="s", markersize=3,
+                        linestyle="--", color=color, label=f"{lbl} base")
+            if show_ema:
+                # Dotted when overlaid on raw; solid + marker when alone.
+                norm_kw = (dict(linestyle=":", linewidth=1.4) if show_raw
+                           else dict(marker="o", markersize=3))
+                base_kw = (dict(linestyle=":", linewidth=1.4) if show_raw
+                           else dict(marker="s", markersize=3, linestyle="--"))
+                if nxe:
+                    ax.plot(nxe, [y * 100 for y in nye], color=color,
+                            label=f"{lbl} norm EMA", **norm_kw)
+                if bxe:
+                    ax.plot(bxe, [y * 100 for y in bye], color=color,
+                            label=f"{lbl} base EMA", **base_kw)
+
+            # Δ subplot tracks the same signal: EMA when only EMA shown, else raw.
+            if mode == "ema":
+                d_nx, d_ny, d_bx, d_by = nxe, nye, bxe, bye
+            else:
+                d_nx, d_ny, d_bx, d_by = nxs, nys, bxs, bys
+            bmap = dict(zip(d_bx, d_by))
             dxs, dys = [], []
-            for ep, y in zip(nxs, nys):
+            for ep, y in zip(d_nx, d_ny):
                 if ep in bmap:
                     dxs.append(ep)
                     dys.append((y - bmap[ep]) * 100)
