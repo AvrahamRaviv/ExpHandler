@@ -15,6 +15,7 @@ from scanners.normnet import scan_normnet
 from screens.runs import RunsScreen
 from screens.plots import PlotsScreen
 from screens.monitor import MonitorScreen
+from screens.channels import ChannelsScreen
 from screens.launcher import LauncherScreen
 from screens.vbp_wizard import VBPWizardScreen
 from ui import theme
@@ -83,13 +84,16 @@ class MainWindow(QMainWindow):
         self.runs_screen = RunsScreen()
         self.plots_screen = PlotsScreen()
         self.monitor_screen = MonitorScreen()
+        self.channels_screen = ChannelsScreen()
         self.launcher_screen = LauncherScreen()
         self.wizard_screen = VBPWizardScreen()
         self.tabs.addTab(self.runs_screen, "Runs")
         self.tabs.addTab(self.plots_screen, "Plots")
         self.tabs.addTab(self.monitor_screen, "Monitor")
+        self._channels_tab_idx = self.tabs.addTab(self.channels_screen, "Channels")
         self._launcher_tab_idx = self.tabs.addTab(self.launcher_screen, "Launcher")
         self._wizard_tab_idx = self.tabs.addTab(self.wizard_screen, "VBP Wizard")
+        self.tabs.setTabVisible(self._channels_tab_idx, False)
         self.tabs.setTabVisible(self._launcher_tab_idx, False)
         self.tabs.setTabVisible(self._wizard_tab_idx, False)
         content_layout.addWidget(self.tabs, stretch=1)
@@ -238,6 +242,8 @@ class MainWindow(QMainWindow):
         self.runs_screen.load(project, data)
         self.plots_screen.load(project, data)
         self.monitor_screen.load(project, data)
+        self.channels_screen.load(project, full_path)
+        self.tabs.setTabVisible(self._channels_tab_idx, True)
         if cfg["extra_tabs"]:
             self.launcher_screen.load(subtype, root_path)
         self.tabs.setTabVisible(self._launcher_tab_idx, cfg["extra_tabs"])
@@ -268,6 +274,7 @@ class MainWindow(QMainWindow):
 
     def _hide_subtype_bar(self):
         self.subtype_bar.setVisible(False)
+        self.tabs.setTabVisible(self._channels_tab_idx, False)
         self.tabs.setTabVisible(self._launcher_tab_idx, False)
         self.tabs.setTabVisible(self._wizard_tab_idx, False)
 

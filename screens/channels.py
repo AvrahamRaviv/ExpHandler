@@ -1,0 +1,347 @@
+"""Channels screen: per-network 2D channel-score heatmap.
+
+Each layer is a row, each channel a colored cell (color = score). Supports
+per-layer vs per-network normalization, descending sort within layers,
+side-by-side comparison of several files, and a per-channel diff (A−B) when
+exactly two architecture-matched files are selected.
+"""
+
+import os
+
+from PyQt5.QtWidgets import (
+    QWidget, QHBoxLayout, QVBoxLayout, QSplitter,
+    QListWidget, QListWidgetItem, QLabel, QAbstractItemView, QGroupBox,
+    QPushButton, QLineEdit, QComboBox, QCheckBox, QFileDialog,
+)
+from PyQt5.QtCore import Qt
+
+import numpy as np
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
+from matplotlib.figure import Figure
+from matplotlib import colormaps
+from matplotlib.colors import Normalize
+
+from scanners.channel_scores import discover_channel_scores, load_channel_scores
+
+_SEQ_CMAPS = ["viridis", "magma", "plasma", "cividis"]
+_DIFF_CMAP = "coolwarm"
+_MAX_YTICKS = 60          # avoid unreadable axis on very deep nets
+_LABEL_MAXLEN = 28
+
+
+class ChannelsScreen(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._project: str = ""
+        # Per-record cache keyed by abs path: parsed channel-score dict.
+        self._records: dict[str, dict] = {}
+        # In-session selection cache keyed by project name.
+        self._selections: dict[str, set] = {}
+
+        splitter = QSplitter(Qt.Horizontal)
+
+        # ── Left: file selector + controls ────────────────────────────
+        side = QWidget()
+        side_layout = QVBoxLayout(side)
+        side_layout.setContentsMargins(4, 4, 4, 4)
+        side_layout.setSpacing(4)
+
+        title = QLabel("Score files")
+        title.setStyleSheet("font-weight: bold;")
+        side_layout.addWidget(title)
+
+        self.filter_input = QLineEdit()
+        self.filter_input.setPlaceholderText("Filter…")
+        self.filter_input.setClearButtonEnabled(True)
+        self.filter_input.textChanged.connect(self._apply_filter)
+        side_layout.addWidget(self.filter_input)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(4)
+        self.btn_all = QPushButton("All")
+        self.btn_all.setFixedHeight(24)
+        self.btn_all.setStyleSheet("font-size: 11px;")
+        self.btn_all.clicked.connect(self._select_all)
+        self.btn_none = QPushButton("None")
+        self.btn_none.setFixedHeight(24)
+        self.btn_none.setStyleSheet("font-size: 11px;")
+        self.btn_none.clicked.connect(self._select_none)
+        btn_row.addWidget(self.btn_all)
+        btn_row.addWidget(self.btn_none)
+        side_layout.addLayout(btn_row)
+
+        self.file_list = QListWidget()
+        self.file_list.setSelectionMode(QAbstractItemView.MultiSelection)
+        self.file_list.itemSelectionChanged.connect(self._on_selection_changed)
+        side_layout.addWidget(self.file_list)
+
+        self.btn_load = QPushButton("📂 Load file…")
+        self.btn_load.setFixedHeight(26)
+        self.btn_load.setToolTip("Add channel-score JSON files from disk")
+        self.btn_load.clicked.connect(self._load_files_dialog)
+        side_layout.addWidget(self.btn_load)
+
+        # Controls
+        ctrl = QGroupBox("Display")
+        ctrl_layout = QVBoxLayout(ctrl)
+        ctrl_layout.setSpacing(4)
+
+        ctrl_layout.addWidget(QLabel("Normalization"))
+        self.norm_box = QComboBox()
+        self.norm_box.addItem("Per-layer", "layer")
+        self.norm_box.addItem("Per-network", "net")
+        self.norm_box.currentIndexChanged.connect(self._render)
+        ctrl_layout.addWidget(self.norm_box)
+
+        self.sort_chk = QCheckBox("Sort channels by score (per layer)")
+        self.sort_chk.stateChanged.connect(self._render)
+        ctrl_layout.addWidget(self.sort_chk)
+
+        ctrl_layout.addWidget(QLabel("View"))
+        self.view_box = QComboBox()
+        self.view_box.addItem("Side-by-side", "side")
+        self.view_box.addItem("Diff (A−B)", "diff")
+        self.view_box.currentIndexChanged.connect(self._render)
+        ctrl_layout.addWidget(self.view_box)
+
+        ctrl_layout.addWidget(QLabel("Colormap"))
+        self.cmap_box = QComboBox()
+        for c in _SEQ_CMAPS:
+            self.cmap_box.addItem(c, c)
+        self.cmap_box.currentIndexChanged.connect(self._render)
+        ctrl_layout.addWidget(self.cmap_box)
+
+        side_layout.addWidget(ctrl)
+
+        self.hint = QLabel("")
+        self.hint.setWordWrap(True)
+        self.hint.setStyleSheet("color: gray; font-size: 11px;")
+        side_layout.addWidget(self.hint)
+
+        side.setMinimumWidth(210)
+        side.setMaximumWidth(320)
+        splitter.addWidget(side)
+
+        # ── Right: matplotlib canvas ──────────────────────────────────
+        plot_widget = QWidget()
+        plot_layout = QVBoxLayout(plot_widget)
+        plot_layout.setContentsMargins(0, 0, 0, 0)
+        self.figure = Figure(tight_layout=True)
+        self.canvas = FigureCanvasQTAgg(self.figure)
+        self.toolbar = NavigationToolbar2QT(self.canvas, plot_widget)
+        plot_layout.addWidget(self.toolbar)
+        plot_layout.addWidget(self.canvas)
+        splitter.addWidget(plot_widget)
+
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(splitter)
+
+    # ── Public API ────────────────────────────────────────────────────
+    def load(self, project: str, root_dir: str):
+        """Auto-discover score files under ``root_dir`` for ``project``."""
+        if self._project and self._project == project:
+            self._selections[project] = set(self._selected_paths())
+        self._project = project
+
+        prev_sel = self._selections.get(project, set())
+        # Keep already-loaded records (incl. manual ones), add discovered.
+        for p in discover_channel_scores(root_dir):
+            if p not in self._records:
+                rec = load_channel_scores(p)
+                if rec:
+                    self._records[p] = rec
+        self._rebuild_list(prev_sel)
+        self._render()
+
+    # ── File list management ──────────────────────────────────────────
+    def _rebuild_list(self, selected: set):
+        self.file_list.blockSignals(True)
+        self.file_list.clear()
+        for path in sorted(self._records, key=lambda p: self._records[p]["label"]):
+            rec = self._records[path]
+            item = QListWidgetItem(rec["label"])
+            item.setData(Qt.UserRole, path)
+            item.setToolTip(path)
+            self.file_list.addItem(item)
+            item.setSelected(path in selected)
+        self.file_list.blockSignals(False)
+
+    def _load_files_dialog(self):
+        start = os.path.expanduser("~")
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Load channel-score files", start, "JSON files (*.json)"
+        )
+        added = 0
+        for p in paths:
+            ap = os.path.abspath(p)
+            if ap in self._records:
+                continue
+            rec = load_channel_scores(ap)
+            if rec:
+                self._records[ap] = rec
+                added += 1
+        if added:
+            keep = set(self._selected_paths())
+            self._rebuild_list(keep)
+            self._render()
+
+    # ── Selection helpers ─────────────────────────────────────────────
+    def _selected_paths(self) -> list:
+        return [it.data(Qt.UserRole) for it in self.file_list.selectedItems()
+                if not it.isHidden()]
+
+    def _on_selection_changed(self):
+        if self._project:
+            self._selections[self._project] = set(self._selected_paths())
+        self._render()
+
+    def _apply_filter(self, text: str):
+        text = text.strip().lower()
+        self.file_list.blockSignals(True)
+        for i in range(self.file_list.count()):
+            it = self.file_list.item(i)
+            it.setHidden(text != "" and text not in it.text().lower())
+        self.file_list.blockSignals(False)
+        self._render()
+
+    def _select_all(self):
+        self.file_list.blockSignals(True)
+        for i in range(self.file_list.count()):
+            it = self.file_list.item(i)
+            if not it.isHidden():
+                it.setSelected(True)
+        self.file_list.blockSignals(False)
+        self._on_selection_changed()
+
+    def _select_none(self):
+        self.file_list.blockSignals(True)
+        for i in range(self.file_list.count()):
+            self.file_list.item(i).setSelected(False)
+        self.file_list.blockSignals(False)
+        self._on_selection_changed()
+
+    # ── Rendering ─────────────────────────────────────────────────────
+    def _build_matrix(self, rec: dict, sort: bool):
+        """Ragged layer scores → (L, Wmax) array with NaN padding."""
+        layers = rec["layers"]
+        wmax = max(l["scores"].size for l in layers)
+        m = np.full((len(layers), wmax), np.nan)
+        for i, l in enumerate(layers):
+            s = l["scores"]
+            if sort:
+                s = np.sort(s)[::-1]
+            m[i, : s.size] = s
+        return m
+
+    @staticmethod
+    def _scale_rows(m: np.ndarray) -> np.ndarray:
+        """Per-row min-max scale to [0,1], ignoring NaN padding."""
+        out = np.full_like(m, np.nan)
+        for i in range(m.shape[0]):
+            row = m[i]
+            valid = np.isfinite(row)
+            if not valid.any():
+                continue
+            v = row[valid]
+            lo, hi = float(v.min()), float(v.max())
+            out[i, valid] = 0.5 if hi <= lo else (v - lo) / (hi - lo)
+        return out
+
+    def _set_yaxis(self, ax, rec: dict):
+        layers = rec["layers"]
+        n = len(layers)
+        ax.set_ylim(n, 0)
+        if n <= _MAX_YTICKS:
+            ax.set_yticks(np.arange(n) + 0.5)
+            ax.set_yticklabels([self._trunc(l["name"]) for l in layers], fontsize=6)
+        else:
+            ax.set_yticks([])
+        ax.set_xlabel("channel", fontsize=8)
+        ax.tick_params(axis="x", labelsize=7)
+
+    @staticmethod
+    def _trunc(s: str) -> str:
+        return s if len(s) <= _LABEL_MAXLEN else "…" + s[-(_LABEL_MAXLEN - 1):]
+
+    def _render(self):
+        self.figure.clear()
+        paths = self._selected_paths()
+        recs = [self._records[p] for p in paths if p in self._records]
+        sort = self.sort_chk.isChecked()
+        per_net = self.norm_box.currentData() == "net"
+        view = self.view_box.currentData()
+        cmap_name = self.cmap_box.currentData()
+
+        # Diff availability: exactly 2, matching architecture.
+        diff_ok = (len(recs) == 2
+                   and recs[0]["arch_key"] == recs[1]["arch_key"])
+
+        if not recs:
+            self.hint.setText("Select one or more score files to view.")
+            self.canvas.draw()
+            return
+
+        if view == "diff" and diff_ok:
+            self._render_diff(recs)
+        else:
+            if view == "diff" and not diff_ok:
+                self.hint.setText("Diff needs exactly 2 files with identical "
+                                  "architecture. Showing side-by-side.")
+            else:
+                self.hint.setText(self._side_hint(diff_ok))
+            self._render_side(recs, sort, per_net, cmap_name)
+        self.figure.canvas.draw()
+
+    def _side_hint(self, diff_ok: bool) -> str:
+        if diff_ok:
+            return "2 matched files — switch View to Diff for A−B map."
+        return ""
+
+    def _render_side(self, recs, sort, per_net, cmap_name):
+        axes = self.figure.subplots(1, len(recs), sharey=True, squeeze=False)[0]
+        cmap = colormaps[cmap_name].copy()
+        cmap.set_bad(alpha=0.0)
+        for ax, rec in zip(axes, recs):
+            m = self._build_matrix(rec, sort)
+            if per_net:
+                norm = Normalize(rec["gmin"], rec["gmax"])
+                data = np.ma.masked_invalid(m)
+            else:
+                data = np.ma.masked_invalid(self._scale_rows(m))
+                norm = Normalize(0.0, 1.0)
+            im = ax.imshow(data, aspect="auto", interpolation="nearest",
+                           cmap=cmap, norm=norm,
+                           extent=[0, m.shape[1], m.shape[0], 0])
+            ax.set_title(self._trunc(rec["label"]), fontsize=8)
+            self._set_yaxis(ax, rec)
+            if per_net:
+                self.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+
+    def _render_diff(self, recs):
+        a, b = recs
+        # Channel-aligned diff per layer (sort disabled so indices correspond).
+        layers = a["layers"]
+        wmax = max(l["scores"].size for l in layers)
+        m = np.full((len(layers), wmax), np.nan)
+        for i, (la, lb) in enumerate(zip(layers, b["layers"])):
+            d = la["scores"] - lb["scores"]
+            m[i, : d.size] = d
+        cmap = colormaps[_DIFF_CMAP].copy()
+        cmap.set_bad(alpha=0.0)
+        finite = m[np.isfinite(m)]
+        vmax = float(np.abs(finite).max()) if finite.size else 1.0
+        vmax = vmax or 1.0
+        norm = Normalize(-vmax, vmax)
+        ax = self.figure.subplots(1, 1)
+        im = ax.imshow(np.ma.masked_invalid(m), aspect="auto",
+                       interpolation="nearest", cmap=cmap, norm=norm,
+                       extent=[0, wmax, len(layers), 0])
+        ax.set_title(f"{self._trunc(a['label'])}  −  {self._trunc(b['label'])}",
+                     fontsize=8)
+        self._set_yaxis(ax, a)
+        self.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+        self.hint.setText("Diff = A − B (channel-aligned). Red > 0, blue < 0.")
