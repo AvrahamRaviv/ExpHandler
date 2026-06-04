@@ -35,9 +35,12 @@ class ChannelsScreen(QWidget):
         super().__init__(parent)
         self._project: str = ""
         # Per-record cache keyed by abs path: parsed channel-score dict.
+        # Auto-discovered records are reset on every load(); manual ones
+        # (rec["_manual"]) persist across project/arch switches.
         self._records: dict[str, dict] = {}
-        # In-session selection cache keyed by project name.
+        # In-session selection cache keyed by the scanned dir.
         self._selections: dict[str, set] = {}
+        self._cur_dir: str = ""
 
         splitter = QSplitter(Qt.Horizontal)
 
@@ -183,20 +186,40 @@ class ChannelsScreen(QWidget):
 
     # ── Public API ────────────────────────────────────────────────────
     def load(self, project: str, root_dir: str):
-        """Auto-discover score files under ``root_dir`` for ``project``."""
-        if self._project and self._project == project:
-            self._selections[project] = set(self._selected_paths())
+        """Show only score files under ``root_dir`` (plus manual ones)."""
+        if self._cur_dir:                       # snapshot the dir we leave
+            self._selections[self._cur_dir] = set(self._selected_paths())
         self._project = project
+        self._cur_dir = root_dir
 
-        prev_sel = self._selections.get(project, set())
-        # Keep already-loaded records (incl. manual ones), add discovered.
+        # Reset auto-discovered records to this dir only; keep manual files.
+        self._records = {p: r for p, r in self._records.items()
+                         if r.get("_manual")}
         for p in discover_channel_scores(root_dir):
             if p not in self._records:
                 rec = load_channel_scores(p)
                 if rec:
+                    rec["label"] = self._path_label(p, root_dir)
                     self._records[p] = rec
-        self._rebuild_list(prev_sel)
+        self._rebuild_list(self._selections.get(root_dir, set()))
         self._render()
+
+    @staticmethod
+    def _path_label(path: str, root_dir: str) -> str:
+        """Label = file path relative to the scanned dir, sans suffix.
+
+        Keeps the per-arch sub-dir (e.g. ``loc_mean/run_l1``) so files that
+        share a scorer but live in different suffix dirs stay distinct.
+        """
+        try:
+            rel = os.path.relpath(path, root_dir)
+        except ValueError:
+            rel = os.path.basename(path)
+        for suf in ("_channel_scores.json", ".json"):
+            if rel.endswith(suf):
+                rel = rel[: -len(suf)]
+                break
+        return rel or os.path.basename(path)
 
     # ── File list management ──────────────────────────────────────────
     def _rebuild_list(self, selected: set):
@@ -223,6 +246,7 @@ class ChannelsScreen(QWidget):
                 continue
             rec = load_channel_scores(ap)
             if rec:
+                rec["_manual"] = True          # survives project/arch switches
                 self._records[ap] = rec
                 added += 1
         if added:
@@ -236,8 +260,8 @@ class ChannelsScreen(QWidget):
                 if not it.isHidden()]
 
     def _on_selection_changed(self):
-        if self._project:
-            self._selections[self._project] = set(self._selected_paths())
+        if self._cur_dir:
+            self._selections[self._cur_dir] = set(self._selected_paths())
         self._render()
 
     def _apply_filter(self, text: str):

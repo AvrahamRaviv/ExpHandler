@@ -127,8 +127,38 @@ def test_discover_and_render():
         return out
 
 
+def test_dir_isolation_and_labels():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5.QtWidgets import QApplication
+    from screens.channels import ChannelsScreen
+    app = QApplication.instance() or QApplication([])
+
+    with tempfile.TemporaryDirectory() as root:
+        a = os.path.join(root, "archA")
+        b = os.path.join(root, "archB")
+        for sub in ("loc_mean", "glob_none"):
+            os.makedirs(os.path.join(a, sub))
+            _write_net(os.path.join(a, sub, "run_l1_channel_scores.json"), "l1")
+        os.makedirs(b)
+        _write_net(os.path.join(b, "run_l1_channel_scores.json"), "l1")
+
+        scr = ChannelsScreen()
+        scr.load("NORMNET", a)
+        labels = {scr.file_list.item(i).text() for i in range(scr.file_list.count())}
+        # Only archA files, and labels carry the suffix sub-dir.
+        assert labels == {"loc_mean/run_l1", "glob_none/run_l1"}, labels
+
+        # Switching arch must NOT accumulate archA's files.
+        scr.load("NORMNET", b)
+        labels_b = {scr.file_list.item(i).text() for i in range(scr.file_list.count())}
+        assert labels_b == {"run_l1"}, labels_b
+        assert scr.file_list.count() == 1
+        print("test_dir_isolation_and_labels OK")
+
+
 if __name__ == "__main__":
     test_loader()
     test_tolerant()
+    test_dir_isolation_and_labels()
     out = test_discover_and_render()
     print("ALL PASS")
