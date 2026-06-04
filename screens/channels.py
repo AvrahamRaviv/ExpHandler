@@ -86,23 +86,35 @@ class ChannelsScreen(QWidget):
         ctrl_layout = QVBoxLayout(ctrl)
         ctrl_layout.setSpacing(4)
 
-        ctrl_layout.addWidget(QLabel("Normalization"))
+        ctrl_layout.addWidget(QLabel("Scope"))
         self.norm_box = QComboBox()
         self.norm_box.addItem("Per-layer", "layer")
-        self.norm_box.addItem("Per-network", "net")
+        self.norm_box.addItem("Global", "net")
+        self.norm_box.setToolTip("Reference used when Normalized is on.")
         self.norm_box.currentIndexChanged.connect(self._render)
         ctrl_layout.addWidget(self.norm_box)
 
-        ctrl_layout.addWidget(QLabel("Color scale"))
+        self.normalized_chk = QCheckBox("Normalized (→ 0–1 by scope)")
+        self.normalized_chk.setChecked(True)
+        self.normalized_chk.setToolTip(
+            "On: min-max each layer (Per-layer) or the whole net (Global) to "
+            "0–1.\nOff: raw score units on a shared color bar (Color scale "
+            "applies)."
+        )
+        self.normalized_chk.stateChanged.connect(self._on_normalized_changed)
+        ctrl_layout.addWidget(self.normalized_chk)
+
+        ctrl_layout.addWidget(QLabel("Color scale (raw only)"))
         self.scale_box = QComboBox()
         self.scale_box.addItem("Linear", "linear")
         self.scale_box.addItem("Log", "log")
         self.scale_box.addItem("Robust (2–98%)", "robust")
         self.scale_box.setToolTip(
-            "Heavy-tailed scores (e.g. weight norms) crush a linear scale; "
-            "Log or Robust spread the low end."
+            "Raw mode only. Heavy-tailed scores (e.g. weight norms) crush a "
+            "linear scale; Log or Robust spread the low end."
         )
         self.scale_box.currentIndexChanged.connect(self._render)
+        self.scale_box.setEnabled(False)   # Normalized on by default
         ctrl_layout.addWidget(self.scale_box)
 
         self.sort_chk = QCheckBox("Sort channels by score (per layer)")
@@ -250,30 +262,24 @@ class ChannelsScreen(QWidget):
         return m
 
     @staticmethod
-    def _scale_rows(m: np.ndarray, scale: str) -> np.ndarray:
-        """Per-row scale to [0,1] under the chosen transform, ignoring NaN pad.
-
-        ``log`` and ``robust`` tame heavy-tailed rows (one giant channel norm
-        crushing the rest) before the min-max so the low end stays visible.
-        """
+    def _norm_per_layer(m: np.ndarray) -> np.ndarray:
+        """Per-row min-max to [0,1], ignoring NaN padding."""
         out = np.full_like(m, np.nan)
         for i in range(m.shape[0]):
-            row = m[i]
-            valid = np.isfinite(row)
+            valid = np.isfinite(m[i])
             if not valid.any():
                 continue
-            v = row[valid].astype(float)
-            if scale == "log":
-                mn = float(v.min())
-                if mn <= 0:                       # shift into positive range
-                    v = v - mn + max(abs(mn), 1.0) * 1e-3
-                v = np.log10(v)
-            elif scale == "robust":
-                lo, hi = np.percentile(v, [2, 98])
-                v = np.clip(v, lo, hi)
+            v = m[i, valid]
             lo, hi = float(v.min()), float(v.max())
             out[i, valid] = 0.5 if hi <= lo else (v - lo) / (hi - lo)
         return out
+
+    @staticmethod
+    def _norm_global(m: np.ndarray, gmin: float, gmax: float) -> np.ndarray:
+        """Whole-net min-max to [0,1], ignoring NaN padding."""
+        if gmax <= gmin:
+            return np.where(np.isfinite(m), 0.5, np.nan)
+        return (m - gmin) / (gmax - gmin)
 
     @staticmethod
     def _flat(rec: dict) -> np.ndarray:
@@ -324,7 +330,8 @@ class ChannelsScreen(QWidget):
         paths = self._selected_paths()
         recs = [self._records[p] for p in paths if p in self._records]
         sort = self.sort_chk.isChecked()
-        per_net = self.norm_box.currentData() == "net"
+        scope = self.norm_box.currentData()           # "layer" | "net"
+        normalized = self.normalized_chk.isChecked()
         scale = self.scale_box.currentData()
         view = self.view_box.currentData()
         cmap_name = self.cmap_box.currentData()
@@ -346,7 +353,7 @@ class ChannelsScreen(QWidget):
                                   "architecture. Showing side-by-side.")
             else:
                 self.hint.setText(self._side_hint(diff_ok))
-            self._render_side(recs, sort, per_net, scale, cmap_name)
+            self._render_side(recs, sort, scope, normalized, scale, cmap_name)
         self.figure.canvas.draw()
 
     def _side_hint(self, diff_ok: bool) -> str:
@@ -354,20 +361,32 @@ class ChannelsScreen(QWidget):
             return "2 matched files — switch View to Diff for A−B map."
         return ""
 
-    def _render_side(self, recs, sort, per_net, scale, cmap_name):
+    def _on_normalized_changed(self):
+        # Color scale (Log/Robust) only bites on raw values.
+        self.scale_box.setEnabled(not self.normalized_chk.isChecked())
+        self._render()
+
+    def _render_side(self, recs, sort, scope, normalized, scale, cmap_name):
         axes = self.figure.subplots(1, len(recs), sharey=True, squeeze=False)[0]
         cmap = colormaps[cmap_name].copy()
         cmap.set_bad(alpha=0.0)
         for ax, rec in zip(axes, recs):
             m = self._build_matrix(rec, sort)
-            if per_net:
+            if not normalized:
+                # Raw score units, shared bar; scope only affects normalization
+                # so it is irrelevant here — sort still applies per layer.
                 norm = self._net_norm(rec, scale)
                 data = np.ma.masked_invalid(m)
                 clabel = "score"
-            else:
-                data = np.ma.masked_invalid(self._scale_rows(m, scale))
+            elif scope == "layer":
+                data = np.ma.masked_invalid(self._norm_per_layer(m))
                 norm = Normalize(0.0, 1.0)
                 clabel = "per-layer 0–1"
+            else:   # global normalized
+                data = np.ma.masked_invalid(
+                    self._norm_global(m, rec["gmin"], rec["gmax"]))
+                norm = Normalize(0.0, 1.0)
+                clabel = "global 0–1"
             im = ax.imshow(data, aspect="auto", interpolation="nearest",
                            cmap=cmap, norm=norm,
                            extent=[0, m.shape[1], m.shape[0], 0])
