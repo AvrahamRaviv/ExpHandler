@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import (
     QPushButton, QLineEdit, QComboBox, QCheckBox, QFileDialog,
 )
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QIntValidator
 
 import numpy as np
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
@@ -120,6 +121,22 @@ class ChannelsScreen(QWidget):
         self.sort_chk = QCheckBox("Sort channels by score (per layer)")
         self.sort_chk.stateChanged.connect(self._render)
         ctrl_layout.addWidget(self.sort_chk)
+
+        topn_row = QHBoxLayout()
+        topn_row.setSpacing(4)
+        topn_row.addWidget(QLabel("Top-N / layer"))
+        self.topn_input = QLineEdit()
+        self.topn_input.setPlaceholderText("all")
+        self.topn_input.setFixedWidth(70)
+        self.topn_input.setValidator(QIntValidator(1, 10_000_000, self))
+        self.topn_input.setToolTip(
+            "Keep only the N highest-scoring channels per layer "
+            "(empty = all). Side-by-side only."
+        )
+        self.topn_input.editingFinished.connect(self._render)
+        topn_row.addWidget(self.topn_input)
+        topn_row.addStretch()
+        ctrl_layout.addLayout(topn_row)
 
         ctrl_layout.addWidget(QLabel("View"))
         self.view_box = QComboBox()
@@ -249,17 +266,36 @@ class ChannelsScreen(QWidget):
         self._on_selection_changed()
 
     # ── Rendering ─────────────────────────────────────────────────────
-    def _build_matrix(self, rec: dict, sort: bool):
-        """Ragged layer scores → (L, Wmax) array with NaN padding."""
+    def _build_matrix(self, rec: dict, sort: bool, top_n: int | None):
+        """Ragged layer scores → (L, Wmax) array with NaN padding.
+
+        ``top_n`` keeps only the N best channels per layer (best = highest
+        score, or lowest when ``higher_is_better`` is False). When ``sort`` is
+        off the kept channels stay in original index order; when on they are
+        ordered best-first.
+        """
+        hib = rec.get("higher_is_better", True)
         layers = rec["layers"]
-        wmax = max(l["scores"].size for l in layers)
-        m = np.full((len(layers), wmax), np.nan)
-        for i, l in enumerate(layers):
+        rows = []
+        for l in layers:
             s = l["scores"]
-            if sort:
-                s = np.sort(s)[::-1]
-            m[i, : s.size] = s
+            rank = s if hib else -s          # larger rank == "better"
+            if top_n and s.size > top_n:
+                idx = np.argpartition(rank, -top_n)[-top_n:]
+                idx = idx[np.argsort(rank[idx])[::-1]] if sort else np.sort(idx)
+                s = s[idx]
+            elif sort:
+                s = s[np.argsort(rank)[::-1]]
+            rows.append(s)
+        wmax = max(r.size for r in rows)
+        m = np.full((len(layers), wmax), np.nan)
+        for i, r in enumerate(rows):
+            m[i, : r.size] = r
         return m
+
+    def _top_n(self) -> int | None:
+        txt = self.topn_input.text().strip()
+        return int(txt) if txt.isdigit() and int(txt) > 0 else None
 
     @staticmethod
     def _norm_per_layer(m: np.ndarray) -> np.ndarray:
@@ -330,6 +366,7 @@ class ChannelsScreen(QWidget):
         paths = self._selected_paths()
         recs = [self._records[p] for p in paths if p in self._records]
         sort = self.sort_chk.isChecked()
+        top_n = self._top_n()
         scope = self.norm_box.currentData()           # "layer" | "net"
         normalized = self.normalized_chk.isChecked()
         scale = self.scale_box.currentData()
@@ -352,8 +389,13 @@ class ChannelsScreen(QWidget):
                 self.hint.setText("Diff needs exactly 2 files with identical "
                                   "architecture. Showing side-by-side.")
             else:
-                self.hint.setText(self._side_hint(diff_ok))
-            self._render_side(recs, sort, scope, normalized, scale, cmap_name)
+                msgs = []
+                if top_n:
+                    msgs.append(f"Top {top_n} channels/layer (x = rank).")
+                if diff_ok:
+                    msgs.append("2 matched files — View→Diff for A−B.")
+                self.hint.setText("  ".join(msgs))
+            self._render_side(recs, sort, top_n, scope, normalized, scale, cmap_name)
         self.figure.canvas.draw()
 
     def _side_hint(self, diff_ok: bool) -> str:
@@ -366,12 +408,12 @@ class ChannelsScreen(QWidget):
         self.scale_box.setEnabled(not self.normalized_chk.isChecked())
         self._render()
 
-    def _render_side(self, recs, sort, scope, normalized, scale, cmap_name):
+    def _render_side(self, recs, sort, top_n, scope, normalized, scale, cmap_name):
         axes = self.figure.subplots(1, len(recs), sharey=True, squeeze=False)[0]
         cmap = colormaps[cmap_name].copy()
         cmap.set_bad(alpha=0.0)
         for ax, rec in zip(axes, recs):
-            m = self._build_matrix(rec, sort)
+            m = self._build_matrix(rec, sort, top_n)
             if not normalized:
                 # Raw score units, shared bar; scope only affects normalization
                 # so it is irrelevant here — sort still applies per layer.

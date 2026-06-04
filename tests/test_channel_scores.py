@@ -94,6 +94,15 @@ def test_discover_and_render():
         # Select both, exercise every render path.
         for i in range(2):
             scr.file_list.item(i).setSelected(True)
+        # Top-N: width is clamped to N per layer (here all layers >= 10).
+        scr.topn_input.setText("10")
+        scr.view_box.setCurrentIndex(0)
+        scr.normalized_chk.setChecked(True)
+        scr._render()
+        m = scr._build_matrix(scr._records[found[0]], sort=True, top_n=10)
+        assert m.shape[1] == 10, m.shape
+        scr.topn_input.setText("")                # back to all
+
         for scope in range(2):                    # per-layer / global
             scr.norm_box.setCurrentIndex(scope)
             for sort in (False, True):
