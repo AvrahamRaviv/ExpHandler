@@ -19,7 +19,7 @@ import numpy as np
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from matplotlib import colormaps
-from matplotlib.colors import Normalize
+from matplotlib.colors import Normalize, LogNorm, SymLogNorm
 
 from scanners.channel_scores import discover_channel_scores, load_channel_scores
 
@@ -92,6 +92,18 @@ class ChannelsScreen(QWidget):
         self.norm_box.addItem("Per-network", "net")
         self.norm_box.currentIndexChanged.connect(self._render)
         ctrl_layout.addWidget(self.norm_box)
+
+        ctrl_layout.addWidget(QLabel("Color scale"))
+        self.scale_box = QComboBox()
+        self.scale_box.addItem("Linear", "linear")
+        self.scale_box.addItem("Log", "log")
+        self.scale_box.addItem("Robust (2–98%)", "robust")
+        self.scale_box.setToolTip(
+            "Heavy-tailed scores (e.g. weight norms) crush a linear scale; "
+            "Log or Robust spread the low end."
+        )
+        self.scale_box.currentIndexChanged.connect(self._render)
+        ctrl_layout.addWidget(self.scale_box)
 
         self.sort_chk = QCheckBox("Sort channels by score (per layer)")
         self.sort_chk.stateChanged.connect(self._render)
@@ -238,18 +250,58 @@ class ChannelsScreen(QWidget):
         return m
 
     @staticmethod
-    def _scale_rows(m: np.ndarray) -> np.ndarray:
-        """Per-row min-max scale to [0,1], ignoring NaN padding."""
+    def _scale_rows(m: np.ndarray, scale: str) -> np.ndarray:
+        """Per-row scale to [0,1] under the chosen transform, ignoring NaN pad.
+
+        ``log`` and ``robust`` tame heavy-tailed rows (one giant channel norm
+        crushing the rest) before the min-max so the low end stays visible.
+        """
         out = np.full_like(m, np.nan)
         for i in range(m.shape[0]):
             row = m[i]
             valid = np.isfinite(row)
             if not valid.any():
                 continue
-            v = row[valid]
+            v = row[valid].astype(float)
+            if scale == "log":
+                mn = float(v.min())
+                if mn <= 0:                       # shift into positive range
+                    v = v - mn + max(abs(mn), 1.0) * 1e-3
+                v = np.log10(v)
+            elif scale == "robust":
+                lo, hi = np.percentile(v, [2, 98])
+                v = np.clip(v, lo, hi)
             lo, hi = float(v.min()), float(v.max())
             out[i, valid] = 0.5 if hi <= lo else (v - lo) / (hi - lo)
         return out
+
+    @staticmethod
+    def _flat(rec: dict) -> np.ndarray:
+        """Cached flat array of all finite scores across the network."""
+        f = rec.get("_flat")
+        if f is None:
+            allv = np.concatenate([l["scores"].ravel() for l in rec["layers"]])
+            f = allv[np.isfinite(allv)]
+            rec["_flat"] = f
+        return f
+
+    def _net_norm(self, rec: dict, scale: str):
+        """Shared per-network norm in original score units."""
+        gmin, gmax = rec["gmin"], rec["gmax"]
+        if scale == "log":
+            if gmin > 0:
+                return LogNorm(vmin=gmin, vmax=gmax)
+            flat = self._flat(rec)
+            pos = np.abs(flat[flat != 0])
+            lt = float(np.percentile(pos, 10)) if pos.size else 1.0
+            return SymLogNorm(linthresh=max(lt, 1e-12), vmin=gmin, vmax=gmax)
+        if scale == "robust":
+            lo, hi = np.percentile(self._flat(rec), [2, 98])
+            lo, hi = float(lo), float(hi)
+            if hi <= lo:
+                hi = lo + 1.0
+            return Normalize(lo, hi)
+        return Normalize(gmin, gmax)
 
     def _set_yaxis(self, ax, rec: dict):
         layers = rec["layers"]
@@ -273,6 +325,7 @@ class ChannelsScreen(QWidget):
         recs = [self._records[p] for p in paths if p in self._records]
         sort = self.sort_chk.isChecked()
         per_net = self.norm_box.currentData() == "net"
+        scale = self.scale_box.currentData()
         view = self.view_box.currentData()
         cmap_name = self.cmap_box.currentData()
 
@@ -293,7 +346,7 @@ class ChannelsScreen(QWidget):
                                   "architecture. Showing side-by-side.")
             else:
                 self.hint.setText(self._side_hint(diff_ok))
-            self._render_side(recs, sort, per_net, cmap_name)
+            self._render_side(recs, sort, per_net, scale, cmap_name)
         self.figure.canvas.draw()
 
     def _side_hint(self, diff_ok: bool) -> str:
@@ -301,25 +354,28 @@ class ChannelsScreen(QWidget):
             return "2 matched files — switch View to Diff for A−B map."
         return ""
 
-    def _render_side(self, recs, sort, per_net, cmap_name):
+    def _render_side(self, recs, sort, per_net, scale, cmap_name):
         axes = self.figure.subplots(1, len(recs), sharey=True, squeeze=False)[0]
         cmap = colormaps[cmap_name].copy()
         cmap.set_bad(alpha=0.0)
         for ax, rec in zip(axes, recs):
             m = self._build_matrix(rec, sort)
             if per_net:
-                norm = Normalize(rec["gmin"], rec["gmax"])
+                norm = self._net_norm(rec, scale)
                 data = np.ma.masked_invalid(m)
+                clabel = "score"
             else:
-                data = np.ma.masked_invalid(self._scale_rows(m))
+                data = np.ma.masked_invalid(self._scale_rows(m, scale))
                 norm = Normalize(0.0, 1.0)
+                clabel = "per-layer 0–1"
             im = ax.imshow(data, aspect="auto", interpolation="nearest",
                            cmap=cmap, norm=norm,
                            extent=[0, m.shape[1], m.shape[0], 0])
             ax.set_title(self._trunc(rec["label"]), fontsize=8)
             self._set_yaxis(ax, rec)
-            if per_net:
-                self.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+            cbar = self.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+            cbar.set_label(clabel, fontsize=7)
+            cbar.ax.tick_params(labelsize=6)
 
     def _render_diff(self, recs):
         a, b = recs
