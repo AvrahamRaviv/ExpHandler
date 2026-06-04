@@ -141,6 +141,15 @@ class ChannelsScreen(QWidget):
         topn_row.addStretch()
         ctrl_layout.addLayout(topn_row)
 
+        self.visible_chk = QCheckBox("Color range: top-N only")
+        self.visible_chk.setToolTip(
+            "When Top-N is set, span the color bar over only the shown top-N "
+            "channels (pooled across layers) instead of all channels — more "
+            "contrast among the kept ones."
+        )
+        self.visible_chk.stateChanged.connect(self._render)
+        ctrl_layout.addWidget(self.visible_chk)
+
         ctrl_layout.addWidget(QLabel("View"))
         self.view_box = QComboBox()
         self.view_box.addItem("Side-by-side", "side")
@@ -351,18 +360,24 @@ class ChannelsScreen(QWidget):
             rec["_flat"] = f
         return f
 
-    def _net_norm(self, rec: dict, scale: str):
-        """Shared per-network norm in original score units."""
-        gmin, gmax = rec["gmin"], rec["gmax"]
+    @staticmethod
+    def _range_norm(vals: np.ndarray, scale: str):
+        """Shared color norm (score units) over the given value pool.
+
+        ``vals`` is whatever set the bar should span — the whole net, or only
+        the visible top-N channels.
+        """
+        if vals.size == 0:
+            return Normalize(0.0, 1.0)
+        gmin, gmax = float(vals.min()), float(vals.max())
         if scale == "log":
             if gmin > 0:
                 return LogNorm(vmin=gmin, vmax=gmax)
-            flat = self._flat(rec)
-            pos = np.abs(flat[flat != 0])
+            pos = np.abs(vals[vals != 0])
             lt = float(np.percentile(pos, 10)) if pos.size else 1.0
             return SymLogNorm(linthresh=max(lt, 1e-12), vmin=gmin, vmax=gmax)
         if scale == "robust":
-            lo, hi = np.percentile(self._flat(rec), [2, 98])
+            lo, hi = np.percentile(vals, [2, 98])
             lo, hi = float(lo), float(hi)
             if hi <= lo:
                 hi = lo + 1.0
@@ -436,23 +451,30 @@ class ChannelsScreen(QWidget):
         axes = self.figure.subplots(1, len(recs), sharey=True, squeeze=False)[0]
         cmap = colormaps[cmap_name].copy()
         cmap.set_bad(alpha=0.0)
+        # Visible-only range: derive the color span from the shown cells (the
+        # pooled top-N across layers) instead of every channel. No-op without
+        # top-N (m then holds all channels anyway).
+        vis_only = self.visible_chk.isChecked() and top_n is not None
         for ax, rec in zip(axes, recs):
             m = self._build_matrix(rec, sort, top_n)
+            finite = m[np.isfinite(m)]
+            pool = finite if vis_only else self._flat(rec)
             if not normalized:
                 # Raw score units, shared bar; scope only affects normalization
                 # so it is irrelevant here — sort still applies per layer.
-                norm = self._net_norm(rec, scale)
+                norm = self._range_norm(pool, scale)
                 data = np.ma.masked_invalid(m)
-                clabel = "score"
+                clabel = "score (top-N)" if vis_only else "score"
             elif scope == "layer":
                 data = np.ma.masked_invalid(self._norm_per_layer(m))
                 norm = Normalize(0.0, 1.0)
                 clabel = "per-layer 0–1"
             else:   # global normalized
-                data = np.ma.masked_invalid(
-                    self._norm_global(m, rec["gmin"], rec["gmax"]))
+                lo, hi = ((float(pool.min()), float(pool.max()))
+                          if pool.size else (rec["gmin"], rec["gmax"]))
+                data = np.ma.masked_invalid(self._norm_global(m, lo, hi))
                 norm = Normalize(0.0, 1.0)
-                clabel = "global 0–1"
+                clabel = "top-N 0–1" if vis_only else "global 0–1"
             im = ax.imshow(data, aspect="auto", interpolation="nearest",
                            cmap=cmap, norm=norm,
                            extent=[0, m.shape[1], m.shape[0], 0])

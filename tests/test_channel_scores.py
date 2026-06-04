@@ -156,9 +156,39 @@ def test_dir_isolation_and_labels():
         print("test_dir_isolation_and_labels OK")
 
 
+def test_visible_range():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5.QtWidgets import QApplication
+    from screens.channels import ChannelsScreen
+    app = QApplication.instance() or QApplication([])
+    with tempfile.TemporaryDirectory() as d:
+        _write_net(os.path.join(d, "run_channel_scores.json"), "l1", seed=3)
+        scr = ChannelsScreen()
+        scr.load("VBP", d)
+        scr.file_list.item(0).setSelected(True)
+        rec = scr._records[scr.file_list.item(0).data(_role())]
+
+        m = scr._build_matrix(rec, sort=True, top_n=5)
+        visible = m[np.isfinite(m)]
+        allv = scr._flat(rec)
+        # Top-5 pool excludes the network's low tail, so its min sits well
+        # above the global min -> a tighter color range.
+        n_all = scr._range_norm(allv, "linear")
+        n_vis = scr._range_norm(visible, "linear")
+        assert n_vis.vmin > n_all.vmin, (n_vis.vmin, n_all.vmin)
+        assert n_vis.vmin == visible.min()
+        print("test_visible_range OK")
+
+
+def _role():
+    from PyQt5.QtCore import Qt
+    return Qt.UserRole
+
+
 if __name__ == "__main__":
     test_loader()
     test_tolerant()
     test_dir_isolation_and_labels()
+    test_visible_range()
     out = test_discover_and_render()
     print("ALL PASS")
