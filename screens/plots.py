@@ -73,6 +73,7 @@ class PlotsScreen(QWidget):
         self.nn_plot_type = QComboBox()
         self.nn_plot_type.addItem("Curves (per run)", "curves")
         self.nn_plot_type.addItem("Pair compare (val_acc + Δ)", "pairs")
+        self.nn_plot_type.addItem("Acc vs MACs", "acc_vs_macs")
         self.nn_plot_type.addItem("V-norm health", "vnorm")
         self.nn_plot_type.currentIndexChanged.connect(self._on_nn_plot_type_changed)
         nn_pt_layout.addWidget(self.nn_plot_type)
@@ -428,7 +429,7 @@ class PlotsScreen(QWidget):
         if pt == "vnorm":
             items, default = self._NN_VNORM_STATS, {"mean", "median"}
             title, show = "V-norm stats", True
-        elif pt == "pairs":
+        elif pt in ("pairs", "acc_vs_macs"):
             items, default, title, show = [], set(), "Metrics", False
         else:  # curves
             items, default = self._NN_CURVE_METRICS, {"val_acc"}
@@ -785,6 +786,8 @@ class PlotsScreen(QWidget):
             self._plot_normnet_pairs()
         elif pt == "vnorm":
             self._plot_normnet_vnorm()
+        elif pt == "acc_vs_macs":
+            self._plot_normnet_acc_vs_macs()
         else:
             self._plot_normnet_curves()
 
@@ -992,6 +995,52 @@ class PlotsScreen(QWidget):
         )
         ax2.set_title(f"Δ best_val_acc — {dbest}" if dbest
                       else "Δ val_acc per epoch (norm − base)")
+
+    def _plot_normnet_acc_vs_macs(self):
+        """Best Val Acc vs MACs (G), one dot per run. Mirrors VBP's headline
+        scatter. Color groups by prune.scorer when present (normnet_main
+        pipeline runs), else by arm — so different pruning methods or
+        normalized-vs-baseline pairs cluster visually."""
+        import matplotlib.cm as mcm
+        from matplotlib.lines import Line2D
+
+        runs = self._selected_nn_runs()
+        if not runs:
+            self._empty("Select runs")
+            return
+
+        pts = []
+        for r in runs:
+            x = r.get("macs_g")
+            y = r.get("best_val_acc")
+            if x is None or y is None:
+                continue
+            group = (r.get("prune") or {}).get("scorer") or r.get("arm") or "?"
+            pts.append((x, y * 100, group, r.get("name", "")))
+
+        if not pts:
+            self._empty("No runs have macs_g + best_val_acc")
+            return
+
+        groups = sorted({g for _, _, g, _ in pts})
+        cmap = mcm.get_cmap("tab10")
+        gcolor = {g: cmap(i % 10) for i, g in enumerate(groups)}
+
+        ax = self.figure.add_subplot(111)
+        for x, y, g, _ in pts:
+            ax.scatter(x, y, color=gcolor[g], s=70, zorder=3)
+            ax.annotate(f"{y:.2f}", (x, y), textcoords="offset points",
+                        xytext=(5, 4), fontsize=7)
+
+        handles = [Line2D([0], [0], marker="o", color="w",
+                          markerfacecolor=gcolor[g], markersize=8, label=g)
+                   for g in groups]
+        ax.legend(handles=handles, **self._legend_kwargs(len(groups), base=8.0))
+        ax.set_xlabel("MACs (G)")
+        ax.set_ylabel("Best Val Accuracy (%)")
+        ax.set_title("NORMNET — Best Accuracy vs MACs "
+                     "(colored by scorer / arm)")
+        ax.grid(True, alpha=0.3)
 
     def _plot_normnet_vnorm(self):
         runs = [e for e in self._selected_nn_runs() if e.get("vnorm")]
