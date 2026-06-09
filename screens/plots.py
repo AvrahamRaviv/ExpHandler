@@ -4,7 +4,7 @@ from PyQt5.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QSplitter,
     QListWidget, QListWidgetItem, QLabel, QAbstractItemView, QGroupBox,
     QPushButton, QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView,
-    QStackedWidget, QComboBox,
+    QStackedWidget, QComboBox, QCheckBox,
 )
 from PyQt5.QtCore import Qt, QTimer
 
@@ -84,6 +84,13 @@ class PlotsScreen(QWidget):
         self.nn_acc_mode.addItem("EMA only", "ema")
         self.nn_acc_mode.currentIndexChanged.connect(self._update_plot)
         nn_pt_layout.addWidget(self.nn_acc_mode)
+        # Treat cum_epoch=0 as retention (pre-FT X marker, default) vs a
+        # regular point on the training line. Some runs (no prune, no reparam
+        # → no meaningful pre-FT) read better with the 0 connected to e1.
+        self.nn_pre_ft_as_x = QCheckBox("0 = retention (X marker)")
+        self.nn_pre_ft_as_x.setChecked(True)
+        self.nn_pre_ft_as_x.toggled.connect(self._update_plot)
+        nn_pt_layout.addWidget(self.nn_pre_ft_as_x)
         selector_layout.addWidget(self.nn_plot_type_box)
 
         # Loss key selector (DVNR only)
@@ -821,11 +828,11 @@ class PlotsScreen(QWidget):
                 exs, eys = _xy("ema_val_acc") if metric == "val_acc" else ([], [])
                 has_ema = bool(exs)
 
-                # For val_acc, split off the cum_epoch=0 point as a distinct
-                # "pre-FT" marker (VBP retention analog). Training line then
-                # starts from cum_epoch>=1 instead of dipping through the X.
+                # For val_acc, optionally split the cum_epoch=0 point off as a
+                # distinct "pre-FT" X marker (VBP retention analog). Toggle off
+                # → 0 stays inline so the line connects 0→1 like any other.
                 pre_ft = None
-                if metric == "val_acc":
+                if metric == "val_acc" and self.nn_pre_ft_as_x.isChecked():
                     rxs_t, rys_t = [], []
                     for ep, y in zip(rxs, rys):
                         if ep == 0:
@@ -910,9 +917,14 @@ class PlotsScreen(QWidget):
             nxs, nys = _xy(norm["epochs"])
             bxs, bys = _xy(base["epochs"])
 
-            # Split off the cum_epoch=0 pre-FT point so the training line
-            # starts at cum_epoch>=1 and we can mark pre-FT as a distinct X.
+            # Optionally split off the cum_epoch=0 pre-FT point so the training
+            # line starts at cum_epoch>=1 and we can mark pre-FT as a distinct
+            # X. Toggle off → 0 stays inline, no X scatter.
+            split_x = self.nn_pre_ft_as_x.isChecked()
+
             def _split(xs, ys):
+                if not split_x:
+                    return xs, ys, None
                 pre = None
                 xs2, ys2 = [], []
                 for ep, y in zip(xs, ys):
