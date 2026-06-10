@@ -1009,11 +1009,10 @@ class PlotsScreen(QWidget):
                       else "Δ val_acc per epoch (norm − base)")
 
     def _plot_normnet_acc_vs_macs(self):
-        """Best Val Acc vs MACs (G), one dot per run. Mirrors VBP's headline
-        scatter. Color groups by prune.scorer when present (normnet_main
-        pipeline runs), else by arm — so different pruning methods or
-        normalized-vs-baseline pairs cluster visually."""
-        import matplotlib.cm as mcm
+        """Best Val Acc vs MACs (G), one dot per run — per-run legend like
+        Curves view. Unfinished runs (no final best_val_acc yet) plot at
+        their running-best epoch acc + pruned MACs from prune.json, drawn
+        with an open marker to distinguish them from finished runs."""
         from matplotlib.lines import Line2D
 
         runs = self._selected_nn_runs()
@@ -1021,37 +1020,60 @@ class PlotsScreen(QWidget):
             self._empty("Select runs")
             return
 
-        pts = []
+        ax = self.figure.add_subplot(111)
+        plotted = 0
+        finished_seen = unfinished_seen = False
         for r in runs:
             x = r.get("macs_g")
-            y = r.get("best_val_acc")
-            if x is None or y is None:
+            # Finished: best_val_acc from run.json. Unfinished: running best
+            # over logged epochs (prefers ema_val_acc when present).
+            y_raw = r.get("best_val_acc")
+            finished = y_raw is not None and r.get("status") == "completed"
+            if y_raw is None:
+                vals = []
+                for e in r.get("epochs", []):
+                    v = e.get("ema_val_acc") or e.get("val_acc")
+                    if v is not None:
+                        vals.append(v)
+                y_raw = max(vals) if vals else None
+            if x is None or y_raw is None:
                 continue
-            group = (r.get("prune") or {}).get("scorer") or r.get("arm") or "?"
-            pts.append((x, y * 100, group, r.get("name", "")))
-
-        if not pts:
-            self._empty("No runs have macs_g + best_val_acc")
-            return
-
-        groups = sorted({g for _, _, g, _ in pts})
-        cmap = mcm.get_cmap("tab10")
-        gcolor = {g: cmap(i % 10) for i, g in enumerate(groups)}
-
-        ax = self.figure.add_subplot(111)
-        for x, y, g, _ in pts:
-            ax.scatter(x, y, color=gcolor[g], s=70, zorder=3)
+            y = y_raw * 100
+            arm = r.get("arm", "")
+            label = f"{r.get('name','')} [{arm[:4]}]"
+            if finished:
+                finished_seen = True
+                # ax.plot used (not scatter) so finished + unfinished share the
+                # same color cycle — keeps per-run color consistent.
+                ax.plot(x, y, marker="o", linestyle="", markersize=9,
+                        zorder=3, label=label)
+            else:
+                unfinished_seen = True
+                ax.plot(x, y, marker="o", linestyle="", markersize=10,
+                        markerfacecolor="none", markeredgewidth=1.8,
+                        zorder=3, label=label + " (run)")
             ax.annotate(f"{y:.2f}", (x, y), textcoords="offset points",
                         xytext=(5, 4), fontsize=7)
+            plotted += 1
 
-        handles = [Line2D([0], [0], marker="o", color="w",
-                          markerfacecolor=gcolor[g], markersize=8, label=g)
-                   for g in groups]
-        ax.legend(handles=handles, **self._legend_kwargs(len(groups), base=8.0))
+        if not plotted:
+            self._empty("No runs have macs_g + (best_val_acc or epoch acc)")
+            return
+
+        handles, labels = ax.get_legend_handles_labels()
+        if finished_seen and unfinished_seen:
+            handles += [Line2D([0], [0], marker="o", color="gray",
+                               markerfacecolor="gray", linestyle="",
+                               markersize=8, label="◼ finished"),
+                        Line2D([0], [0], marker="o", color="gray",
+                               markerfacecolor="none", linestyle="",
+                               markersize=8, label="◻ running (pruned MACs)")]
+            labels += ["finished", "running (pruned MACs)"]
+        ax.legend(handles=handles, **self._legend_kwargs(len(handles), base=8.0))
         ax.set_xlabel("MACs (G)")
         ax.set_ylabel("Best Val Accuracy (%)")
         ax.set_title("NORMNET — Best Accuracy vs MACs "
-                     "(colored by scorer / arm)")
+                     "(open marker = unfinished, plotted at pruned MACs)")
         ax.grid(True, alpha=0.3)
 
     def _plot_normnet_vnorm(self):

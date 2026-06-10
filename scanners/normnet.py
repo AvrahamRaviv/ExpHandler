@@ -314,7 +314,11 @@ def _build_record(root: str, save_dir: str, tag: str, log_cache: dict) -> dict |
         "best_val_acc": _coalesce(rj.get("best_val_acc"),
                                   rj.get("best_ft_val_acc"),
                                   _best_val_acc(run_json, epochs)),
+        # prune.json.macs_g = post-prune (= target) MACs. Falls between final
+        # (post-FT, identical in structure) and dense so unfinished runs land
+        # at their pruned MACs, not the unpruned-net dense value.
         "macs_g": _coalesce(rj.get("macs_g"), rj.get("final_macs_g"),
+                            (prune_json or {}).get("macs_g"),
                             rj.get("dense_macs_g")),
         "params_m": _coalesce(rj.get("params_m"), rj.get("final_params_m"),
                               rj.get("dense_params_m")),
