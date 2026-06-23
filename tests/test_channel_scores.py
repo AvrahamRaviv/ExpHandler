@@ -185,10 +185,108 @@ def _role():
     return Qt.UserRole
 
 
+def _new_screen_with(d, files):
+    """Build a ChannelsScreen over dir ``d`` with all discovered files selected.
+
+    ``files`` is a list of (filename, writer_fn) tuples already written to ``d``.
+    """
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5.QtWidgets import QApplication
+    from screens.channels import ChannelsScreen
+    QApplication.instance() or QApplication([])
+    scr = ChannelsScreen()
+    scr.load("NORMNET", d)
+    for i in range(scr.file_list.count()):
+        scr.file_list.item(i).setSelected(True)
+    return scr
+
+
+def _plot_idx(scr, key):
+    """Index of a plot_box entry by its userData key."""
+    return next(i for i in range(scr.plot_box.count())
+               if scr.plot_box.itemData(i) == key)
+
+
+def test_render_new_plot_types():
+    import itertools
+    with tempfile.TemporaryDirectory() as d:
+        _write_net(os.path.join(d, "run_l1_channel_scores.json"), "l1", seed=1)
+        _write_net(os.path.join(d, "run_vn_channel_scores.json"), "vn", seed=2)
+        scr = _new_screen_with(d, None)
+        assert scr.file_list.count() == 2
+
+        # Ridgeline: enable matrix + control sweep.
+        scr.plot_box.setCurrentIndex(_plot_idx(scr, "ridgeline"))
+        assert not scr.portrait_chk.isEnabled()
+        assert scr.threshold_input.isEnabled() and scr.logx_chk.isEnabled()
+        assert not scr.rank_norm_chk.isEnabled()
+        for nm, lx, th in itertools.product((False, True), (False, True),
+                                            ("", "0.5")):
+            scr.normalized_chk.setChecked(nm)
+            scr.logx_chk.setChecked(lx)
+            scr.threshold_input.setText(th)
+            scr._render()
+
+        # Rank curve.
+        scr.plot_box.setCurrentIndex(_plot_idx(scr, "rank"))
+        assert scr.rank_norm_chk.isEnabled() and not scr.portrait_chk.isEnabled()
+        for nr, ly, tn in itertools.product((False, True), (False, True),
+                                            ("", "10")):
+            scr.rank_norm_chk.setChecked(nr)
+            scr.logx_chk.setChecked(ly)
+            scr.topn_input.setText(tn)
+            scr._render()
+        scr.topn_input.setText("")
+
+        # Kept vs pruned (fixtures carry masks on even layers).
+        scr.plot_box.setCurrentIndex(_plot_idx(scr, "kept"))
+        assert scr.sep_metric_box.isEnabled()
+        assert not scr.topn_input.isEnabled()
+        for mi in range(scr.sep_metric_box.count()):
+            scr.sep_metric_box.setCurrentIndex(mi)
+            scr._render()
+
+        out = os.path.join(tempfile.gettempdir(), "channels_dist_render.png")
+        scr.figure.savefig(out, dpi=110)
+        print(f"test_render_new_plot_types OK -> {out}")
+
+
+def test_kept_absent_message():
+    with tempfile.TemporaryDirectory() as d:
+        # A file whose layers all omit the kept mask.
+        data = {"schema": "channel_scores/v1", "model": "m", "scorer": "l1",
+                "layers": [{"name": f"l{i}", "scores": list(range(1, 9))}
+                           for i in range(4)]}
+        json.dump(data, open(os.path.join(d, "nomask_channel_scores.json"), "w"))
+        scr = _new_screen_with(d, None)
+        scr.plot_box.setCurrentIndex(_plot_idx(scr, "kept"))
+        scr._render()                                  # must not raise
+        assert "mask" in scr.hint.text().lower(), scr.hint.text()
+        print("test_kept_absent_message OK")
+
+
+def test_tiny_layer_no_crash():
+    with tempfile.TemporaryDirectory() as d:
+        # Single-channel layer + constant-score layer, both degenerate.
+        data = {"schema": "channel_scores/v1", "model": "m", "scorer": "l1",
+                "layers": [{"name": "single", "scores": [0.5]},
+                           {"name": "const", "scores": [0.3] * 20}]}
+        json.dump(data, open(os.path.join(d, "tiny_channel_scores.json"), "w"))
+        scr = _new_screen_with(d, None)
+        for key in ("ridgeline", "rank"):
+            scr.plot_box.setCurrentIndex(_plot_idx(scr, key))
+            scr.logx_chk.setChecked(True)              # hit positivity guards
+            scr._render()                              # must not raise
+        print("test_tiny_layer_no_crash OK")
+
+
 if __name__ == "__main__":
     test_loader()
     test_tolerant()
     test_dir_isolation_and_labels()
     test_visible_range()
+    test_render_new_plot_types()
+    test_kept_absent_message()
+    test_tiny_layer_no_crash()
     out = test_discover_and_render()
     print("ALL PASS")
