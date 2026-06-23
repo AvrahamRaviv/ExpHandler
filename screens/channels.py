@@ -20,6 +20,7 @@ import numpy as np
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from matplotlib import colormaps
+from matplotlib.cm import ScalarMappable
 from matplotlib.colors import Normalize, LogNorm, SymLogNorm
 
 from scanners.channel_scores import discover_channel_scores, load_channel_scores
@@ -149,6 +150,23 @@ class ChannelsScreen(QWidget):
         )
         self.visible_chk.stateChanged.connect(self._render)
         ctrl_layout.addWidget(self.visible_chk)
+
+        ctrl_layout.addWidget(QLabel("Layout"))
+        self.portrait_chk = QCheckBox("Portrait (layers as columns)")
+        self.portrait_chk.setToolTip(
+            "Flip the map: layers run along the x-axis, channels up the y-axis."
+        )
+        self.portrait_chk.stateChanged.connect(self._render)
+        ctrl_layout.addWidget(self.portrait_chk)
+
+        self.stretch_chk = QCheckBox("Stretch layers to equal width")
+        self.stretch_chk.setToolTip(
+            "Extend every layer across the full width; thin borders mark each "
+            "channel, so a narrow layer shows as wide cells instead of a short "
+            "row. Width is read off the channel-border spacing."
+        )
+        self.stretch_chk.stateChanged.connect(self._render)
+        ctrl_layout.addWidget(self.stretch_chk)
 
         ctrl_layout.addWidget(QLabel("View"))
         self.view_box = QComboBox()
@@ -384,17 +402,75 @@ class ChannelsScreen(QWidget):
             return Normalize(lo, hi)
         return Normalize(gmin, gmax)
 
-    def _set_yaxis(self, ax, rec: dict):
+    def _set_axes(self, ax, rec: dict, portrait: bool, wmax: int):
+        """Label the layer axis with names + the channel axis with 'channel'.
+
+        Landscape: layers on y (0 at top), channels on x. Portrait: layers on x
+        (labels rotated), channels on y (0 at top). ``wmax`` bounds the channel
+        axis explicitly — needed for the stretched pcolormesh path, harmless for
+        imshow.
+        """
         layers = rec["layers"]
         n = len(layers)
-        ax.set_ylim(n, 0)
-        if n <= _MAX_YTICKS:
-            ax.set_yticks(np.arange(n) + 0.5)
-            ax.set_yticklabels([self._trunc(l["name"]) for l in layers], fontsize=6)
+        names = [self._trunc(l["name"]) for l in layers]
+        ticks = np.arange(n) + 0.5
+        ax.set_aspect("auto")
+        if portrait:
+            ax.set_xlim(0, n)
+            ax.set_ylim(wmax, 0)
+            if n <= _MAX_YTICKS:
+                ax.set_xticks(ticks)
+                ax.set_xticklabels(names, fontsize=6, rotation=90)
+            else:
+                ax.set_xticks([])
+            ax.set_ylabel("channel", fontsize=8)
+            ax.tick_params(axis="y", labelsize=7)
         else:
-            ax.set_yticks([])
-        ax.set_xlabel("channel", fontsize=8)
-        ax.tick_params(axis="x", labelsize=7)
+            ax.set_xlim(0, wmax)
+            ax.set_ylim(n, 0)
+            if n <= _MAX_YTICKS:
+                ax.set_yticks(ticks)
+                ax.set_yticklabels(names, fontsize=6)
+            else:
+                ax.set_yticks([])
+            ax.set_xlabel("channel", fontsize=8)
+            ax.tick_params(axis="x", labelsize=7)
+
+    def _draw_matrix(self, ax, dmat, rec, cmap, norm, stretch, portrait):
+        """Render one (L, Wmax) data matrix and return a mappable for the bar.
+
+        ``stretch`` off → single imshow (NaN padding stays transparent, narrow
+        layers are left-aligned). ``stretch`` on → one pcolormesh per layer with
+        channel boundaries spread across the full width and thin per-channel
+        borders, so every layer fills the axis and its width is read off the
+        border spacing. ``portrait`` transposes the layer/channel axes.
+        """
+        L, wmax = dmat.shape
+        if not stretch:
+            data = np.ma.masked_invalid(dmat.T if portrait else dmat)
+            extent = ([0, L, wmax, 0] if portrait else [0, wmax, L, 0])
+            im = ax.imshow(data, aspect="auto", interpolation="nearest",
+                           cmap=cmap, norm=norm, extent=extent)
+            self._set_axes(ax, rec, portrait, wmax)
+            return im
+        for i in range(L):
+            valid = np.isfinite(dmat[i])
+            w = int(valid.sum())
+            if w == 0:
+                continue
+            s = dmat[i, valid][np.newaxis, :]          # (1, w)
+            edges = np.linspace(0.0, wmax, w + 1)      # stretched channel grid
+            lay = np.array([i, i + 1], dtype=float)
+            if portrait:
+                X, Y = np.meshgrid(lay, edges)
+                C = s.T
+            else:
+                X, Y = np.meshgrid(edges, lay)
+                C = s
+            ax.pcolormesh(X, Y, np.ma.masked_invalid(C), cmap=cmap, norm=norm,
+                          edgecolors="0.2", linewidth=0.12, antialiased=False)
+        self._set_axes(ax, rec, portrait, wmax)
+        return ScalarMappable(norm=norm, cmap=cmap)
 
     @staticmethod
     def _trunc(s: str) -> str:
@@ -448,7 +524,13 @@ class ChannelsScreen(QWidget):
         self._render()
 
     def _render_side(self, recs, sort, top_n, scope, normalized, scale, cmap_name):
-        axes = self.figure.subplots(1, len(recs), sharey=True, squeeze=False)[0]
+        portrait = self.portrait_chk.isChecked()
+        stretch = self.stretch_chk.isChecked()
+        # Each file owns its channel axis once stretched/portrait, so share the
+        # layer axis only in the plain landscape case.
+        axes = self.figure.subplots(1, len(recs),
+                                    sharey=not (portrait or stretch),
+                                    squeeze=False)[0]
         cmap = colormaps[cmap_name].copy()
         cmap.set_bad(alpha=0.0)
         # Visible-only range: derive the color span from the shown cells (the
@@ -463,23 +545,20 @@ class ChannelsScreen(QWidget):
                 # Raw score units, shared bar; scope only affects normalization
                 # so it is irrelevant here — sort still applies per layer.
                 norm = self._range_norm(pool, scale)
-                data = np.ma.masked_invalid(m)
+                dmat = m
                 clabel = "score (top-N)" if vis_only else "score"
             elif scope == "layer":
-                data = np.ma.masked_invalid(self._norm_per_layer(m))
+                dmat = self._norm_per_layer(m)
                 norm = Normalize(0.0, 1.0)
                 clabel = "per-layer 0–1"
             else:   # global normalized
                 lo, hi = ((float(pool.min()), float(pool.max()))
                           if pool.size else (rec["gmin"], rec["gmax"]))
-                data = np.ma.masked_invalid(self._norm_global(m, lo, hi))
+                dmat = self._norm_global(m, lo, hi)
                 norm = Normalize(0.0, 1.0)
                 clabel = "top-N 0–1" if vis_only else "global 0–1"
-            im = ax.imshow(data, aspect="auto", interpolation="nearest",
-                           cmap=cmap, norm=norm,
-                           extent=[0, m.shape[1], m.shape[0], 0])
+            im = self._draw_matrix(ax, dmat, rec, cmap, norm, stretch, portrait)
             ax.set_title(self._trunc(rec["label"]), fontsize=8)
-            self._set_yaxis(ax, rec)
             cbar = self.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
             cbar.set_label(clabel, fontsize=7)
             cbar.ax.tick_params(labelsize=6)
@@ -500,11 +579,10 @@ class ChannelsScreen(QWidget):
         vmax = vmax or 1.0
         norm = Normalize(-vmax, vmax)
         ax = self.figure.subplots(1, 1)
-        im = ax.imshow(np.ma.masked_invalid(m), aspect="auto",
-                       interpolation="nearest", cmap=cmap, norm=norm,
-                       extent=[0, wmax, len(layers), 0])
+        im = self._draw_matrix(ax, m, a, cmap, norm,
+                               self.stretch_chk.isChecked(),
+                               self.portrait_chk.isChecked())
         ax.set_title(f"{self._trunc(a['label'])}  −  {self._trunc(b['label'])}",
                      fontsize=8)
-        self._set_yaxis(ax, a)
         self.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
         self.hint.setText("Diff = A − B (channel-aligned). Red > 0, blue < 0.")
