@@ -161,9 +161,8 @@ class ChannelsScreen(QWidget):
 
         self.stretch_chk = QCheckBox("Stretch layers to equal width")
         self.stretch_chk.setToolTip(
-            "Extend every layer across the full width; thin borders mark each "
-            "channel, so a narrow layer shows as wide cells instead of a short "
-            "row. Width is read off the channel-border spacing."
+            "Extend every layer across the full width, so a narrow layer shows "
+            "as wide cells instead of a short row."
         )
         self.stretch_chk.stateChanged.connect(self._render)
         ctrl_layout.addWidget(self.stretch_chk)
@@ -406,9 +405,9 @@ class ChannelsScreen(QWidget):
         """Label the layer axis with names + the channel axis with 'channel'.
 
         Landscape: layers on y (0 at top), channels on x. Portrait: layers on x
-        (labels rotated), channels on y (0 at top). ``wmax`` bounds the channel
-        axis explicitly — needed for the stretched pcolormesh path, harmless for
-        imshow.
+        (labels rotated), channels on y (0 at bottom). ``wmax`` bounds the
+        channel axis explicitly — needed for the stretched pcolormesh path,
+        harmless for imshow.
         """
         layers = rec["layers"]
         n = len(layers)
@@ -417,7 +416,7 @@ class ChannelsScreen(QWidget):
         ax.set_aspect("auto")
         if portrait:
             ax.set_xlim(0, n)
-            ax.set_ylim(wmax, 0)
+            ax.set_ylim(0, wmax)
             if n <= _MAX_YTICKS:
                 ax.set_xticks(ticks)
                 ax.set_xticklabels(names, fontsize=6, rotation=90)
@@ -441,16 +440,20 @@ class ChannelsScreen(QWidget):
 
         ``stretch`` off → single imshow (NaN padding stays transparent, narrow
         layers are left-aligned). ``stretch`` on → one pcolormesh per layer with
-        channel boundaries spread across the full width and thin per-channel
-        borders, so every layer fills the axis and its width is read off the
-        border spacing. ``portrait`` transposes the layer/channel axes.
+        channel boundaries spread across the full width, so every layer fills
+        the axis regardless of its channel count. ``portrait`` transposes the
+        layer/channel axes (channel 0 at the bottom in portrait, left in
+        landscape).
         """
         L, wmax = dmat.shape
         if not stretch:
             data = np.ma.masked_invalid(dmat.T if portrait else dmat)
-            extent = ([0, L, wmax, 0] if portrait else [0, wmax, L, 0])
+            if portrait:
+                extent, origin = [0, L, 0, wmax], "lower"
+            else:
+                extent, origin = [0, wmax, L, 0], "upper"
             im = ax.imshow(data, aspect="auto", interpolation="nearest",
-                           cmap=cmap, norm=norm, extent=extent)
+                           cmap=cmap, norm=norm, extent=extent, origin=origin)
             self._set_axes(ax, rec, portrait, wmax)
             return im
         for i in range(L):
@@ -468,7 +471,7 @@ class ChannelsScreen(QWidget):
                 X, Y = np.meshgrid(edges, lay)
                 C = s
             ax.pcolormesh(X, Y, np.ma.masked_invalid(C), cmap=cmap, norm=norm,
-                          edgecolors="0.2", linewidth=0.12, antialiased=False)
+                          antialiased=False)
         self._set_axes(ax, rec, portrait, wmax)
         return ScalarMappable(norm=norm, cmap=cmap)
 
